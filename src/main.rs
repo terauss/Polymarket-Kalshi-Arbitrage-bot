@@ -343,12 +343,9 @@ async fn main() -> Result<()> {
                 } else {
                     format!("K_yes({}¢) + P_no({}¢) + K_fee({}¢) = {}¢", k_yes, p_no, fee, cost)
                 };
-                if gap <= 10 {
-                    info!("   📊 Best opportunity: {} | {} | gap={:+}¢ | [Poly_yes={}¢ Kalshi_no={}¢ Kalshi_yes={}¢ Poly_no={}¢]",
-                          desc, leg_breakdown, gap, p_yes, k_no, k_yes, p_no);
-                } else {
-                    info!("   📊 Best opportunity: {} | {} | gap={:+}¢ (market efficient)",
-                          desc, leg_breakdown, gap);
+                if gap < 0 {
+                    info!("   💰 ARB FOUND: {} | {} | profit={}¢ | [Poly_yes={}¢ Kalshi_no={}¢ Kalshi_yes={}¢ Poly_no={}¢]",
+                          desc, leg_breakdown, -gap, p_yes, k_no, k_yes, p_no);
                 }
             } else if with_both == 0 {
                 warn!("   ⚠️  No markets with both Kalshi and Polymarket prices - verify WebSocket connections");
