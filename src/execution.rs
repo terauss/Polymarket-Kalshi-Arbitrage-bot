@@ -9,6 +9,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{info, warn, error};
+use reqwest::Client;
+/// Send a Discord notification via webhook
+async fn send_discord_notification(content: &str) {
+    let webhook_url = std::env::var("DISCORD_WEBHOOK_URL").ok();
+    if let Some(url) = webhook_url {
+        let client = Client::new();
+        let _ = client.post(url)
+            .json(&serde_json::json!({"content": content}))
+            .send()
+            .await;
+    }
+}
 
 use crate::kalshi::KalshiApiClient;
 use crate::polymarket_clob::SharedAsyncClient;
@@ -117,6 +129,12 @@ impl ExecutionEngine {
         // Calculate profit
         let profit_cents = req.profit_cents();
         if profit_cents < 1 {
+            // Send Discord notification for under-threshold opportunity
+            let msg = format!(
+                ":warning: Opportunity below threshold! {} | {:?} y={}¢ n={}¢ | profit={}¢",
+                pair.description, req.arb_type, req.yes_price, req.no_price, profit_cents
+            );
+            send_discord_notification(&msg).await;
             self.release_in_flight(market_id);
             return Ok(ExecutionResult {
                 market_id,
@@ -180,6 +198,11 @@ impl ExecutionEngine {
 
         if self.dry_run {
             info!("[EXEC] 🏃 DRY RUN - would execute {} contracts", max_contracts);
+            let msg = format!(
+                ":runner: DRY RUN - would execute {} contracts | {} | profit={}¢",
+                max_contracts, pair.description, profit_cents
+            );
+            send_discord_notification(&msg).await;
             self.release_in_flight_delayed(market_id);
             return Ok(ExecutionResult {
                 market_id,
@@ -192,6 +215,12 @@ impl ExecutionEngine {
 
         // Execute both legs concurrently 
         let result = self.execute_both_legs_async(&req, pair, max_contracts).await;
+        // Send Discord notification for real trade attempt
+        let msg = format!(
+            ":money_with_wings: TRADE PLACED! {} | {:?} y={}¢ n={}¢ | profit={}¢ | {} contracts",
+            pair.description, req.arb_type, req.yes_price, req.no_price, profit_cents, max_contracts
+        );
+        send_discord_notification(&msg).await;
 
         // Release in-flight after delay
         self.release_in_flight_delayed(market_id);
