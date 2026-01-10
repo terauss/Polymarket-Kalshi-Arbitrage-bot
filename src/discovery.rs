@@ -14,6 +14,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::cache::TeamCache;
+use crate::config::{DiscoveryMode, DISCOVERY_MODE};
 use crate::config::{LeagueConfig, get_league_configs, get_league_config};
 use crate::kalshi::KalshiApiClient;
 use crate::polymarket::GammaClient;
@@ -130,6 +131,38 @@ impl DiscoveryClient {
         tokio::fs::write(DISCOVERY_CACHE_PATH, data).await?;
         Ok(())
     }
+        // ---------------------------------------------------------------------
+    // Discovery routing (Sports default, Crypto stub)
+    // ---------------------------------------------------------------------
+
+    /// Routed entrypoint: chooses sports vs crypto discovery based on DISCOVERY_MODE.
+    pub async fn discover_all(&self, leagues: &[&str]) -> DiscoveryResult {
+        match *DISCOVERY_MODE {
+            DiscoveryMode::Sports => self.discover_all_sports(leagues).await,
+            DiscoveryMode::Crypto => self.discover_all_crypto().await,
+        }
+    }
+
+    /// Routed entrypoint (forced): ignores cache for sports; crypto stub returns empty.
+    pub async fn discover_all_force(&self, leagues: &[&str]) -> DiscoveryResult {
+        match *DISCOVERY_MODE {
+            DiscoveryMode::Sports => self.discover_all_force_sports(leagues).await,
+            DiscoveryMode::Crypto => self.discover_all_crypto_force().await,
+        }
+    }
+
+    /// Crypto discovery stub: returns empty results (safe; no behavior change to sports mode).
+    async fn discover_all_crypto(&self) -> DiscoveryResult {
+        info!("🪙 Crypto discovery selected (stub). Returning 0 market pairs.");
+        DiscoveryResult::default()
+    }
+
+    /// Crypto forced discovery stub: returns empty results (safe).
+    async fn discover_all_crypto_force(&self) -> DiscoveryResult {
+        info!("🪙 Crypto discovery forced (stub). Returning 0 market pairs.");
+        DiscoveryResult::default()
+    }
+
     
     /// Discover all market pairs with caching support
     ///
@@ -138,7 +171,8 @@ impl DiscoveryClient {
     /// 2. If cache exists and is fresh (<2 hours), use it directly
     /// 3. If cache exists but is stale, load it + fetch incremental updates
     /// 4. If no cache, do full discovery
-    pub async fn discover_all(&self, leagues: &[&str]) -> DiscoveryResult {
+
+    pub async fn discover_all_sports(&self, leagues: &[&str]) -> DiscoveryResult {
         // Try to load existing cache
         let cached = Self::load_cache().await;
 
@@ -183,7 +217,9 @@ impl DiscoveryClient {
     }
 
     /// Force full discovery (ignores cache)
-    pub async fn discover_all_force(&self, leagues: &[&str]) -> DiscoveryResult {
+
+
+    pub async fn discover_all_force_sports(&self, leagues: &[&str]) -> DiscoveryResult {
         info!("🔄 Forced full discovery (ignoring cache)...");
         let result = self.discover_full(leagues).await;
 

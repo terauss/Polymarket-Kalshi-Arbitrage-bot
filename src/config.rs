@@ -53,6 +53,33 @@ pub struct LeagueConfig {
     pub kalshi_series_btts: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryMode {
+    Sports,
+    Crypto,
+}
+
+impl DiscoveryMode {
+    pub fn from_env() -> Self {
+        // Default = sports (no behavior change)
+        let raw = std::env::var("DISCOVERY_MODE").unwrap_or_else(|_| "sports".to_string());
+        match raw.to_lowercase().as_str() {
+            "sports" => DiscoveryMode::Sports,
+            "crypto" => DiscoveryMode::Crypto,
+            other => {
+                eprintln!(
+                    "WARN: Unknown DISCOVERY_MODE='{}'. Falling back to 'sports'. Use 'sports' or 'crypto'.",
+                    other
+                );
+                DiscoveryMode::Sports
+            }
+        }
+    }
+}
+
+pub static DISCOVERY_MODE: std::sync::LazyLock<DiscoveryMode> =
+    std::sync::LazyLock::new(DiscoveryMode::from_env);
+
 /// Get all supported leagues with their configurations
 pub fn get_league_configs() -> Vec<LeagueConfig> {
     vec![
