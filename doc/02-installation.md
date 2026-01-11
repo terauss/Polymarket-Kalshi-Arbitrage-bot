@@ -90,18 +90,18 @@ If you have Git installed:
 
 3. **Clone the repository:**
    ```bash
-   git clone https://github.com/terauss/prediction-market-arbitrage.git
+   git clone https://github.com/terauss/Polymarket-Kalshi-Arbitrage-bot.git
    ```
 
 4. **Go into the folder:**
    ```bash
-   cd prediction-market-arbitrage
+   cd Polymarket-Kalshi-Arbitrage-bot
    ```
 
 ### Without Git (Download ZIP)
 
 1. **Go to the GitHub repository:**
-   - Visit: https://github.com/terauss/prediction-market-arbitrage
+   - Visit: https://github.com/terauss/Polymarket-Kalshi-Arbitrage-bot.git
    - Click the green "Code" button
    - Click "Download ZIP"
 
@@ -152,7 +152,7 @@ Now let's compile the bot code so it's ready to run:
 
 1. **Make sure you're in the bot folder:**
    ```bash
-   cd prediction-market-arbitrage
+   cd Polymarket-Kalshi-Arbitrage-bot
    ```
    (or wherever you saved it)
 
