@@ -462,7 +462,7 @@ mod infra_integration_tests {
         poly_yes: PriceCents,
         poly_no: PriceCents,
     ) -> (GlobalState, u16) {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         let pair = MarketPair {
             pair_id: "arb-test-market".into(),
@@ -671,10 +671,10 @@ mod infra_integration_tests {
         assert_eq!(state.id_by_poly_no_hash(poly_no_hash), Some(market_id));
     }
 
-    /// Test: GlobalStatehandles multiple markets
+    /// Test: GlobalState handles multiple markets
     #[test]
     fn test_multiple_markets() {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         // Add 5 markets
         for i in 0..5 {

@@ -89,7 +89,7 @@ async fn discovery_refresh_task(
         // Build set of known tickers
         let known_tickers: HashSet<String> = state.markets.iter()
             .take(state.market_count())
-            .filter_map(|m| m.pair.as_ref())
+            .filter_map(|m| m.pair())
             .map(|p| p.kalshi_market_ticker.to_string())
             .collect();
 
@@ -119,8 +119,20 @@ async fn discovery_refresh_task(
                 pair.league, pair.description, pair.kalshi_market_ticker);
         }
 
-        // Signal WebSockets to reconnect
-        info!("[DISCOVERY] Signaling WebSocket reconnect for {} new markets...", result.pairs.len());
+        // Add new pairs to global state (thread-safe via interior mutability)
+        let mut added_count = 0;
+        for pair in result.pairs {
+            if let Some(market_id) = state.add_pair(pair) {
+                added_count += 1;
+                info!("[DISCOVERY] Added market_id {} to state", market_id);
+            } else {
+                warn!("[DISCOVERY] Failed to add pair - state full (MAX_MARKETS reached)");
+            }
+        }
+        info!("[DISCOVERY] Added {} new markets to state (total: {})", added_count, state.market_count());
+
+        // Signal WebSockets to reconnect with updated subscriptions
+        info!("[DISCOVERY] Signaling WebSocket reconnect for {} new markets...", added_count);
         if shutdown_tx.send(true).is_err() {
             warn!("[DISCOVERY] Failed to signal WebSocket reconnect - receivers dropped");
         }
@@ -240,7 +252,7 @@ async fn main() -> Result<()> {
 
     // Build global state
     let state = Arc::new({
-        let mut s = GlobalState::new();
+        let s = GlobalState::new();
         for pair in result.pairs {
             s.add_pair(pair);
         }
@@ -317,7 +329,7 @@ async fn main() -> Result<()> {
             let market_count = test_state.market_count();
             for market_id in 0..market_count {
                 if let Some(market) = test_state.get_by_id(market_id as u16) {
-                    if let Some(pair) = &market.pair {
+                    if let Some(pair) = market.pair() {
                         // SIZE: 1000 cents = 10 contracts (Poly $1 min requires ~3 contracts at 40¢)
                         let fake_req = FastExecutionRequest {
                             market_id: market_id as u16,
@@ -426,8 +438,9 @@ async fn main() -> Result<()> {
             if let Some((cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes)) = best_arb {
                 let gap = cost as i16 - heartbeat_threshold as i16;
                 let pair = heartbeat_state.get_by_id(market_id)
-                    .and_then(|m| m.pair.as_ref());
+                    .and_then(|m| m.pair());
                 let desc = pair
+                    .as_ref()
                     .map(|p| {
                         if let Some(line) = p.line_value {
                             format!("{} ({})", p.description, line)

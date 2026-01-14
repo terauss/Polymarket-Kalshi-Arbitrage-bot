@@ -191,7 +191,7 @@ pub async fn run_ws(
 ) -> Result<()> {
     let tokens: Vec<String> = state.markets.iter()
         .take(state.market_count())
-        .filter_map(|m| m.pair.as_ref())
+        .filter_map(|m| m.pair())
         .flat_map(|p| [p.poly_yes_token.to_string(), p.poly_no_token.to_string()])
         .collect();
 
@@ -321,8 +321,9 @@ async fn process_book(
         .min_by_key(|(p, _)| *p)
         .unwrap_or((0, 0));
 
-    // Check if YES token
-    if let Some(&market_id) = state.poly_yes_to_id.get(&token_hash) {
+    // Check if YES token (release lock before any await)
+    let yes_market_id = state.poly_yes_to_id.read().get(&token_hash).copied();
+    if let Some(market_id) = yes_market_id {
         let market = &state.markets[market_id as usize];
         market.poly.update_yes(best_ask, ask_size);
 
@@ -331,9 +332,12 @@ async fn process_book(
         if arb_mask != 0 {
             send_arb_request(market_id, market, arb_mask, exec_tx, clock).await;
         }
+        return;
     }
-    // Check if NO token
-    else if let Some(&market_id) = state.poly_no_to_id.get(&token_hash) {
+
+    // Check if NO token (release lock before any await)
+    let no_market_id = state.poly_no_to_id.read().get(&token_hash).copied();
+    if let Some(market_id) = no_market_id {
         let market = &state.markets[market_id as usize];
         market.poly.update_no(best_ask, ask_size);
 
@@ -365,8 +369,9 @@ async fn process_price_change(
 
     let token_hash = fxhash_str(&change.asset_id);
 
-    // Check YES token
-    if let Some(&market_id) = state.poly_yes_to_id.get(&token_hash) {
+    // Check YES token (release lock before any await)
+    let yes_market_id = state.poly_yes_to_id.read().get(&token_hash).copied();
+    if let Some(market_id) = yes_market_id {
         let market = &state.markets[market_id as usize];
         let (current_yes, _, current_yes_size, _) = market.poly.load();
 
@@ -380,9 +385,12 @@ async fn process_price_change(
                 send_arb_request(market_id, market, arb_mask, exec_tx, clock).await;
             }
         }
+        return;
     }
-    // Check NO token
-    else if let Some(&market_id) = state.poly_no_to_id.get(&token_hash) {
+
+    // Check NO token (release lock before any await)
+    let no_market_id = state.poly_no_to_id.read().get(&token_hash).copied();
+    if let Some(market_id) = no_market_id {
         let market = &state.markets[market_id as usize];
         let (_, current_no, _, current_no_size) = market.poly.load();
 

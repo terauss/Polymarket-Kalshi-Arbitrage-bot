@@ -107,11 +107,11 @@ impl ExecutionEngine {
             }
         }
 
-        // Get market pair 
+        // Get market pair
         let market = self.state.get_by_id(market_id)
             .ok_or_else(|| anyhow!("Unknown market_id {}", market_id))?;
 
-        let pair = market.pair.as_ref()
+        let pair = market.pair()
             .ok_or_else(|| anyhow!("No pair for market_id {}", market_id))?;
 
         // Calculate profit
@@ -190,8 +190,8 @@ impl ExecutionEngine {
             });
         }
 
-        // Execute both legs concurrently 
-        let result = self.execute_both_legs_async(&req, pair, max_contracts).await;
+        // Execute both legs concurrently
+        let result = self.execute_both_legs_async(&req, &pair, max_contracts).await;
 
         // Release in-flight after delay
         self.release_in_flight_delayed(market_id);

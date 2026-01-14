@@ -435,7 +435,7 @@ pub async fn run_ws(
 ) -> Result<()> {
     let tickers: Vec<String> = state.markets.iter()
         .take(state.market_count())
-        .filter_map(|m| m.pair.as_ref().map(|p| p.kalshi_market_ticker.to_string()))
+        .filter_map(|m| m.pair().map(|p| p.kalshi_market_ticker.to_string()))
         .collect();
 
     if tickers.is_empty() {
@@ -506,7 +506,7 @@ pub async fn run_ws(
                                 let Some(ticker) = ticker else { continue };
                                 let ticker_hash = fxhash_str(ticker);
 
-                                let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else { continue };
+                                let Some(market_id) = state.kalshi_to_id.read().get(&ticker_hash).copied() else { continue };
                                 let market = &state.markets[market_id as usize];
 
                                 match kalshi_msg.msg_type.as_str() {
