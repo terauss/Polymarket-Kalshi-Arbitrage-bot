@@ -34,9 +34,10 @@ mod position_tracker;
 mod types;
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::{error, info, warn};
 
 use cache::TeamCache;
@@ -53,6 +54,86 @@ use types::{GlobalState, PriceCents};
 const POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 /// Polygon chain ID
 const POLYGON_CHAIN_ID: u64 = 137;
+
+/// Background task that periodically discovers new markets
+async fn discovery_refresh_task(
+    discovery: Arc<DiscoveryClient>,
+    state: Arc<GlobalState>,
+    shutdown_tx: watch::Sender<bool>,
+    interval_mins: u64,
+    leagues: &'static [&'static str],
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if interval_mins == 0 {
+        info!("[DISCOVERY] Runtime discovery disabled (DISCOVERY_INTERVAL_MINS=0)");
+        return;
+    }
+
+    info!("[DISCOVERY] Runtime discovery enabled (interval: {}m)", interval_mins);
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_mins * 60));
+    interval.tick().await; // Skip immediate first tick
+
+    // Track last discovery timestamp
+    let mut last_discovery_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    loop {
+        interval.tick().await;
+
+        info!("[DISCOVERY] Running scheduled discovery...");
+
+        // Build set of known tickers
+        let known_tickers: HashSet<String> = state.markets.iter()
+            .take(state.market_count())
+            .filter_map(|m| m.pair.as_ref())
+            .map(|p| p.kalshi_market_ticker.to_string())
+            .collect();
+
+        // Discover new markets since last check
+        let result = discovery.discover_since(last_discovery_ts, &known_tickers, leagues).await;
+
+        // Update timestamp for next iteration
+        last_discovery_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Log errors but continue
+        for err in &result.errors {
+            warn!("[DISCOVERY] {}", err);
+        }
+
+        if result.pairs.is_empty() {
+            info!("[DISCOVERY] No new markets found");
+            continue;
+        }
+
+        // Log new markets with highlighted formatting
+        info!("[DISCOVERY] NEW MARKETS DISCOVERED: {}", result.pairs.len());
+        for pair in &result.pairs {
+            info!("[DISCOVERY]   -> {} | {} | {}",
+                pair.league, pair.description, pair.kalshi_market_ticker);
+        }
+
+        // Signal WebSockets to reconnect
+        info!("[DISCOVERY] Signaling WebSocket reconnect for {} new markets...", result.pairs.len());
+        if shutdown_tx.send(true).is_err() {
+            warn!("[DISCOVERY] Failed to signal WebSocket reconnect - receivers dropped");
+        }
+
+        // Give WebSockets time to shut down gracefully
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Reset shutdown signal for next cycle
+        if shutdown_tx.send(false).is_err() {
+            warn!("[DISCOVERY] Failed to reset shutdown signal - receivers dropped");
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -171,6 +252,9 @@ async fn main() -> Result<()> {
     let (exec_tx, exec_rx) = create_execution_channel();
     let circuit_breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig::from_env()));
 
+    // Create shutdown channel for WebSocket reconnection
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     let position_tracker = Arc::new(RwLock::new(PositionTracker::new()));
     let (position_channel, position_rx) = create_position_channel();
 
@@ -265,9 +349,11 @@ async fn main() -> Result<()> {
     let kalshi_exec_tx = exec_tx.clone();
     let kalshi_threshold = threshold_cents;
     let kalshi_ws_config = KalshiConfig::from_env()?;
+    let kalshi_shutdown_rx = shutdown_rx.clone();
     let kalshi_handle = tokio::spawn(async move {
         loop {
-            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold).await {
+            let shutdown_rx = kalshi_shutdown_rx.clone();
+            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold, shutdown_rx).await {
                 error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
@@ -278,9 +364,11 @@ async fn main() -> Result<()> {
     let poly_state = state.clone();
     let poly_exec_tx = exec_tx.clone();
     let poly_threshold = threshold_cents;
+    let poly_shutdown_rx = shutdown_rx.clone();
     let poly_handle = tokio::spawn(async move {
         loop {
-            if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold).await {
+            let shutdown_rx = poly_shutdown_rx.clone();
+            if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold, shutdown_rx).await {
                 error!("[POLYMARKET] WebSocket disconnected: {} - reconnecting...", e);
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
@@ -365,9 +453,23 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn discovery refresh task
+    let discovery_interval = config::discovery_interval_mins();
+    let discovery_client = Arc::new(discovery);
+    let discovery_state = state.clone();
+    let discovery_handle = tokio::spawn(async move {
+        discovery_refresh_task(
+            discovery_client,
+            discovery_state,
+            shutdown_tx,
+            discovery_interval,
+            ENABLED_LEAGUES,
+        ).await;
+    });
+
     // Main event loop - run until termination
     info!("✅ All systems operational - entering main event loop");
-    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, exec_handle);
+    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, exec_handle, discovery_handle);
 
     Ok(())
 }
