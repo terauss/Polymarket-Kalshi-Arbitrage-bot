@@ -499,13 +499,13 @@ impl DiscoveryClient {
         let poly_team2 = self.team_cache
             .kalshi_to_poly(poly_prefix, &parsed.team2)
             .unwrap_or_else(|| parsed.team2.to_lowercase());
-        
+
         // Convert date from "25DEC27" to "2025-12-27"
         let date_str = kalshi_date_to_iso(&parsed.date);
-        
+
         // Base slug: league-team1-team2-date
         let base = format!("{}-{}-{}-{}", poly_prefix, poly_team1, poly_team2, date_str);
-        
+
         match market_type {
             MarketType::Moneyline => {
                 if let Some(suffix) = extract_team_suffix(&market.ticker) {
@@ -541,6 +541,160 @@ impl DiscoveryClient {
                 format!("{}-btts", base)
             }
         }
+    }
+
+    /// Discover new markets created since a given timestamp
+    /// Returns only NEW pairs not already in the known_tickers set
+    pub async fn discover_since(
+        &self,
+        since_ts: u64,
+        known_tickers: &std::collections::HashSet<String>,
+        leagues: &[&str],
+    ) -> DiscoveryResult {
+        let configs: Vec<_> = if leagues.is_empty() {
+            get_league_configs()
+        } else {
+            leagues.iter()
+                .filter_map(|l| get_league_config(l))
+                .collect()
+        };
+
+        let mut result = DiscoveryResult::default();
+
+        for config in &configs {
+            match self.discover_series_since(config, since_ts, known_tickers).await {
+                Ok(pairs) => {
+                    if !pairs.is_empty() {
+                        tracing::info!("  {} {}: {} new pairs",
+                            config.league_code, "discovery", pairs.len());
+                    }
+                    result.pairs.extend(pairs);
+                }
+                Err(e) => {
+                    result.errors.push(format!("{}: {}", config.league_code, e));
+                }
+            }
+        }
+
+        result.kalshi_events_found = result.pairs.len();
+        result.poly_matches = result.pairs.len();
+        result
+    }
+
+    /// Discover new markets for a single league since timestamp
+    async fn discover_series_since(
+        &self,
+        config: &LeagueConfig,
+        since_ts: u64,
+        known_tickers: &std::collections::HashSet<String>,
+    ) -> Result<Vec<MarketPair>> {
+        let mut all_pairs = Vec::new();
+
+        // Check all series for this league
+        let series_list: Vec<&str> = [
+            Some(config.kalshi_series_game),
+            config.kalshi_series_spread,
+            config.kalshi_series_total,
+            config.kalshi_series_btts,
+        ].into_iter().flatten().collect();
+
+        for series in series_list {
+            // Rate limit
+            {
+                let _permit = self.kalshi_semaphore.acquire().await
+                    .map_err(|e| anyhow::anyhow!("semaphore closed: {}", e))?;
+                self.kalshi_limiter.until_ready().await;
+            }
+
+            let markets = match self.kalshi.get_markets_since(series, since_ts).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("  Failed to query {}: {}", series, e);
+                    continue;
+                }
+            };
+
+            // Filter to only new markets
+            let new_markets: Vec<_> = markets.into_iter()
+                .filter(|m| !known_tickers.contains(&m.ticker))
+                .collect();
+
+            if new_markets.is_empty() {
+                continue;
+            }
+
+            // Look up on Polymarket in parallel
+            let pairs: Vec<MarketPair> = stream::iter(new_markets)
+                .map(|market| {
+                    async move {
+                        self.try_match_market(config, &market).await
+                    }
+                })
+                .buffer_unordered(GAMMA_CONCURRENCY)
+                .filter_map(|x| async { x })
+                .collect()
+                .await;
+
+            all_pairs.extend(pairs);
+        }
+
+        Ok(all_pairs)
+    }
+
+    /// Try to match a single Kalshi market to Polymarket
+    async fn try_match_market(&self, config: &LeagueConfig, market: &KalshiMarket) -> Option<MarketPair> {
+        // Extract event ticker from market ticker (format: SERIES-EVENTID-SUFFIX)
+        let parts: Vec<&str> = market.ticker.split('-').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        // Reconstruct event ticker (SERIES-EVENTID)
+        let event_ticker = format!("{}-{}", parts[0], parts[1]);
+
+        // Determine market type from series
+        let market_type = if market.ticker.contains("SPREAD") {
+            MarketType::Spread
+        } else if market.ticker.contains("TOTAL") {
+            MarketType::Total
+        } else if market.ticker.contains("BTTS") {
+            MarketType::Btts
+        } else {
+            MarketType::Moneyline
+        };
+
+        // Parse event ticker to get teams and date
+        let parsed = parse_kalshi_event_ticker(&event_ticker)?;
+
+        // Build poly slug
+        let poly_slug = self.build_poly_slug(config.poly_prefix, &parsed, market_type, market);
+
+        // Look up on Polymarket
+        let _permit = self.gamma_semaphore.acquire().await.ok()?;
+        let (yes_token, no_token) = match self.gamma.lookup_market(&poly_slug).await {
+            Ok(Some((yes, no))) => (yes, no),
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!("  ⚠️ Gamma lookup failed for {}: {}", poly_slug, e);
+                return None;
+            }
+        };
+
+        let team_suffix = extract_team_suffix(&market.ticker);
+
+        Some(MarketPair {
+            pair_id: format!("{}-{}", poly_slug, market.ticker).into(),
+            league: config.league_code.into(),
+            market_type,
+            description: format!("{}", market.title).into(),
+            kalshi_event_ticker: event_ticker.into(),
+            kalshi_market_ticker: market.ticker.clone().into(),
+            poly_slug: poly_slug.into(),
+            poly_yes_token: yes_token.into(),
+            poly_no_token: no_token.into(),
+            line_value: market.floor_strike,
+            team_suffix: team_suffix.map(|s| s.into()),
+        })
     }
 }
 
