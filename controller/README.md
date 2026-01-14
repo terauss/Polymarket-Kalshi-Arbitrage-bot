@@ -38,23 +38,23 @@ An arbitrage system for cross-platform prediction market trading between Kalshi 
 # Rust 1.75+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Navigate to project directory
-cd prediction-market-arbitrage  # or your project directory name
+# Navigate to repo root
+cd Polymarket-Kalshi-Arbitrage-bot  # or your project directory name
 
-# Build
-cargo build --release
+# Build controller (workspace)
+cargo build -p controller --release
 ```
 
 📖 **Detailed installation guide:** [Installation Guide](./doc/02-installation.md)
 
 ### 2. Set Up Credentials
 
-Create a `.env` file:
+Create a `.env` file **in the repo root** (one folder above `controller/`):
 
 ```bash
 # === KALSHI CREDENTIALS ===
 KALSHI_API_KEY_ID=your_kalshi_api_key_id
-KALSHI_PRIVATE_KEY_PATH=/path/to/kalshi_private_key.pem
+KALSHI_PRIVATE_KEY_PATH=/path/to/kalshi_private_key.pem   # can be relative to repo root
 
 # === POLYMARKET CREDENTIALS ===
 POLY_PRIVATE_KEY=0xYOUR_WALLET_PRIVATE_KEY
@@ -71,13 +71,25 @@ RUST_LOG=info
 
 ```bash
 # Dry run (paper trading)
-dotenvx run -- cargo run --release
+cargo run -p controller --release
 
 # Live execution
-DRY_RUN=0 dotenvx run -- cargo run --release
+DRY_RUN=0 cargo run -p controller --release
 ```
 
+Notes:
+- The controller **auto-loads** `.env` (no `dotenvx` required), searching both the current directory and the repo root.
+- If `KALSHI_PRIVATE_KEY_PATH` is a relative path, it will be resolved relative to either the current directory, the repo root, or `controller/`.
+
 📖 **Running the bot guide:** [Running the Bot](./doc/05-running-the-bot.md)
+
+### Quick Smoke Test (Discovery Only)
+
+If you just want to confirm credentials + discovery are working (and exit immediately):
+
+```bash
+DISCOVERY_ONLY=1 FORCE_DISCOVERY=1 cargo run -p controller --release
+```
 
 ---
 
@@ -245,18 +257,22 @@ Profit:           2¢ per contract
 ## Architecture
 
 ```
-src/
+controller/src/
 ├── main.rs              # Entry point, WebSocket orchestration
-├── types.rs             # MarketArbState
+├── types.rs             # Market state + arb detection
 ├── execution.rs         # Concurrent leg execution, in-flight deduplication
-├── position_tracker.rs  # Channel-based fill recording, P&L tracking
+├── position_tracker.rs  # Fill recording + P&L tracking
 ├── circuit_breaker.rs   # Risk limits, error tracking, auto-halt
 ├── discovery.rs         # Kalshi↔Polymarket market matching
 ├── cache.rs             # Team code mappings (EPL, NBA, etc.)
 ├── kalshi.rs            # Kalshi REST/WS client
 ├── polymarket.rs        # Polymarket WS client
 ├── polymarket_clob.rs   # Polymarket CLOB order execution
-└── config.rs            # League configs, thresholds
+├── config.rs            # League configs, thresholds
+└── paths.rs             # Path + .env resolution helpers
+
+trader/src/              # Optional "remote trader" client (separate binary)
+└── ...
 ```
 
 ### Key Features
