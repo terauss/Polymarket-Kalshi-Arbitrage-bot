@@ -280,6 +280,16 @@ impl KalshiApiClient {
         let resp: KalshiMarketsResponse = self.get(&path).await?;
         Ok(resp.markets)
     }
+
+    /// Get markets created since a given timestamp for a series
+    pub async fn get_markets_since(&self, series_ticker: &str, since_ts: u64) -> Result<Vec<KalshiMarket>> {
+        let path = format!(
+            "/markets?series_ticker={}&min_created_ts={}&status=open&limit=100",
+            series_ticker, since_ts
+        );
+        let resp: KalshiMarketsResponse = self.get(&path).await?;
+        Ok(resp.markets)
+    }
     
     /// Generic authenticated POST request
     async fn post<T: serde::de::DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T> {
