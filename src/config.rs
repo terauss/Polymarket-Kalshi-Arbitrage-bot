@@ -180,3 +180,37 @@ pub fn get_league_config(league: &str) -> Option<LeagueConfig> {
         .into_iter()
         .find(|c| c.league_code == league || c.poly_prefix == league)
 }
+
+/// Discovery refresh interval in minutes (default: 15, 0 = disabled)
+pub fn discovery_interval_mins() -> u64 {
+    std::env::var("DISCOVERY_INTERVAL_MINS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_discovery_interval_default() {
+        // Clear any existing env var
+        std::env::remove_var("DISCOVERY_INTERVAL_MINS");
+        assert_eq!(discovery_interval_mins(), 15);
+    }
+
+    #[test]
+    fn test_discovery_interval_custom() {
+        std::env::set_var("DISCOVERY_INTERVAL_MINS", "30");
+        assert_eq!(discovery_interval_mins(), 30);
+        std::env::remove_var("DISCOVERY_INTERVAL_MINS");
+    }
+
+    #[test]
+    fn test_discovery_interval_zero_disables() {
+        std::env::set_var("DISCOVERY_INTERVAL_MINS", "0");
+        assert_eq!(discovery_interval_mins(), 0);
+        std::env::remove_var("DISCOVERY_INTERVAL_MINS");
+    }
+}
