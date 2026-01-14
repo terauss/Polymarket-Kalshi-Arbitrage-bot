@@ -4,9 +4,10 @@
 //! orderbook representation, and arbitrage opportunity detection.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 use rustc_hash::FxHashMap;
+use parking_lot::RwLock;
 
 // === Market Types ===
 
@@ -156,8 +157,8 @@ pub struct AtomicMarketState {
     pub kalshi: AtomicOrderbook,
     /// Polymarket platform orderbook state
     pub poly: AtomicOrderbook,
-    /// Market pair metadata (immutable after discovery phase)
-    pub pair: Option<Arc<MarketPair>>,
+    /// Market pair metadata (supports runtime addition via interior mutability)
+    pair: RwLock<Option<Arc<MarketPair>>>,
     /// Unique market identifier for O(1) lookups
     pub market_id: u16,
 }
@@ -167,9 +168,21 @@ impl AtomicMarketState {
         Self {
             kalshi: AtomicOrderbook::new(),
             poly: AtomicOrderbook::new(),
-            pair: None,
+            pair: RwLock::new(None),
             market_id,
         }
+    }
+
+    /// Get a clone of the market pair (read lock)
+    #[inline]
+    pub fn pair(&self) -> Option<Arc<MarketPair>> {
+        self.pair.read().clone()
+    }
+
+    /// Set the market pair (write lock) - used during runtime market addition
+    #[inline]
+    pub fn set_pair(&self, pair: Arc<MarketPair>) {
+        *self.pair.write() = Some(pair);
     }
 
     #[inline(always)]
@@ -320,22 +333,23 @@ impl FastExecutionRequest {
     }
 }
 
-/// Global market state manager for all tracked markets across both platforms
+/// Global market state manager for all tracked markets across both platforms.
+/// Supports concurrent market addition at runtime via interior mutability.
 pub struct GlobalState {
     /// Market states indexed by market_id for O(1) access
     pub markets: Vec<AtomicMarketState>,
 
-    /// Next available market identifier (monotonically increasing)
-    next_market_id: u16,
+    /// Next available market identifier (monotonically increasing, atomic)
+    next_market_id: AtomicU16,
 
-    /// O(1) lookup map: pre-hashed Kalshi ticker → market_id
-    pub kalshi_to_id: FxHashMap<u64, u16>,
+    /// O(1) lookup map: pre-hashed Kalshi ticker → market_id (RwLock for runtime updates)
+    pub kalshi_to_id: RwLock<FxHashMap<u64, u16>>,
 
-    /// O(1) lookup map: pre-hashed Polymarket YES token → market_id
-    pub poly_yes_to_id: FxHashMap<u64, u16>,
+    /// O(1) lookup map: pre-hashed Polymarket YES token → market_id (RwLock for runtime updates)
+    pub poly_yes_to_id: RwLock<FxHashMap<u64, u16>>,
 
-    /// O(1) lookup map: pre-hashed Polymarket NO token → market_id
-    pub poly_no_to_id: FxHashMap<u64, u16>,
+    /// O(1) lookup map: pre-hashed Polymarket NO token → market_id (RwLock for runtime updates)
+    pub poly_no_to_id: RwLock<FxHashMap<u64, u16>>,
 }
 
 impl GlobalState {
@@ -347,34 +361,46 @@ impl GlobalState {
 
         Self {
             markets,
-            next_market_id: 0,
-            kalshi_to_id: FxHashMap::default(),
-            poly_yes_to_id: FxHashMap::default(),
-            poly_no_to_id: FxHashMap::default(),
+            next_market_id: AtomicU16::new(0),
+            kalshi_to_id: RwLock::new(FxHashMap::default()),
+            poly_yes_to_id: RwLock::new(FxHashMap::default()),
+            poly_no_to_id: RwLock::new(FxHashMap::default()),
         }
     }
 
-    /// Add a market pair, returns market_id
-    pub fn add_pair(&mut self, pair: MarketPair) -> Option<u16> {
-        if self.next_market_id as usize >= MAX_MARKETS {
+    /// Add a market pair, returns market_id.
+    /// Thread-safe: uses interior mutability for concurrent access.
+    pub fn add_pair(&self, pair: MarketPair) -> Option<u16> {
+        // Atomically increment and get market_id
+        let market_id = self.next_market_id.fetch_add(1, Ordering::SeqCst);
+
+        if market_id as usize >= MAX_MARKETS {
+            // Rollback if we exceeded capacity
+            self.next_market_id.fetch_sub(1, Ordering::SeqCst);
             return None;
         }
-
-        let market_id = self.next_market_id;
-        self.next_market_id += 1;
 
         // Pre-compute hashes
         let kalshi_hash = fxhash_str(&pair.kalshi_market_ticker);
         let poly_yes_hash = fxhash_str(&pair.poly_yes_token);
         let poly_no_hash = fxhash_str(&pair.poly_no_token);
 
-        // Update lookup maps
-        self.kalshi_to_id.insert(kalshi_hash, market_id);
-        self.poly_yes_to_id.insert(poly_yes_hash, market_id);
-        self.poly_no_to_id.insert(poly_no_hash, market_id);
+        // Update lookup maps (write locks)
+        {
+            let mut kalshi = self.kalshi_to_id.write();
+            kalshi.insert(kalshi_hash, market_id);
+        }
+        {
+            let mut poly_yes = self.poly_yes_to_id.write();
+            poly_yes.insert(poly_yes_hash, market_id);
+        }
+        {
+            let mut poly_no = self.poly_no_to_id.write();
+            poly_no.insert(poly_no_hash, market_id);
+        }
 
-        // Store pair
-        self.markets[market_id as usize].pair = Some(Arc::new(pair));
+        // Store pair using the new set_pair method
+        self.markets[market_id as usize].set_pair(Arc::new(pair));
 
         Some(market_id)
     }
@@ -383,7 +409,7 @@ impl GlobalState {
     #[inline(always)]
     #[allow(dead_code)]
     pub fn get_by_kalshi_hash(&self, hash: u64) -> Option<&AtomicMarketState> {
-        let id = *self.kalshi_to_id.get(&hash)?;
+        let id = *self.kalshi_to_id.read().get(&hash)?;
         Some(&self.markets[id as usize])
     }
 
@@ -391,7 +417,7 @@ impl GlobalState {
     #[inline(always)]
     #[allow(dead_code)]
     pub fn get_by_poly_yes_hash(&self, hash: u64) -> Option<&AtomicMarketState> {
-        let id = *self.poly_yes_to_id.get(&hash)?;
+        let id = *self.poly_yes_to_id.read().get(&hash)?;
         Some(&self.markets[id as usize])
     }
 
@@ -399,7 +425,7 @@ impl GlobalState {
     #[inline(always)]
     #[allow(dead_code)]
     pub fn get_by_poly_no_hash(&self, hash: u64) -> Option<&AtomicMarketState> {
-        let id = *self.poly_no_to_id.get(&hash)?;
+        let id = *self.poly_no_to_id.read().get(&hash)?;
         Some(&self.markets[id as usize])
     }
 
@@ -407,21 +433,21 @@ impl GlobalState {
     #[inline(always)]
     #[allow(dead_code)]
     pub fn id_by_poly_yes_hash(&self, hash: u64) -> Option<u16> {
-        self.poly_yes_to_id.get(&hash).copied()
+        self.poly_yes_to_id.read().get(&hash).copied()
     }
 
     /// Get market_id by Poly NO token hash
     #[inline(always)]
     #[allow(dead_code)]
     pub fn id_by_poly_no_hash(&self, hash: u64) -> Option<u16> {
-        self.poly_no_to_id.get(&hash).copied()
+        self.poly_no_to_id.read().get(&hash).copied()
     }
 
     /// Get market_id by Kalshi ticker hash
     #[inline(always)]
     #[allow(dead_code)]
     pub fn id_by_kalshi_hash(&self, hash: u64) -> Option<u16> {
-        self.kalshi_to_id.get(&hash).copied()
+        self.kalshi_to_id.read().get(&hash).copied()
     }
 
     /// Get market by ID
@@ -435,7 +461,7 @@ impl GlobalState {
     }
 
     pub fn market_count(&self) -> usize {
-        self.next_market_id as usize
+        self.next_market_id.load(Ordering::Acquire) as usize
     }
 }
 
@@ -828,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_global_state_add_pair() {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         let pair = make_test_pair("001");
         let kalshi_ticker = pair.kalshi_market_ticker.clone();
@@ -845,14 +871,14 @@ mod tests {
         let poly_yes_hash = fxhash_str(&poly_yes);
         let poly_no_hash = fxhash_str(&poly_no);
 
-        assert!(state.kalshi_to_id.contains_key(&kalshi_hash));
-        assert!(state.poly_yes_to_id.contains_key(&poly_yes_hash));
-        assert!(state.poly_no_to_id.contains_key(&poly_no_hash));
+        assert!(state.kalshi_to_id.read().contains_key(&kalshi_hash));
+        assert!(state.poly_yes_to_id.read().contains_key(&poly_yes_hash));
+        assert!(state.poly_no_to_id.read().contains_key(&poly_no_hash));
     }
 
     #[test]
     fn test_global_state_lookups() {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         let pair = make_test_pair("002");
         let kalshi_ticker = pair.kalshi_market_ticker.clone();
@@ -862,17 +888,17 @@ mod tests {
 
         // Test get_by_id
         let market = state.get_by_id(id).expect("Should find by id");
-        assert!(market.pair.is_some());
+        assert!(market.pair().is_some());
 
         // Test get_by_kalshi_hash
         let market = state.get_by_kalshi_hash(fxhash_str(&kalshi_ticker))
             .expect("Should find by Kalshi hash");
-        assert!(market.pair.is_some());
+        assert!(market.pair().is_some());
 
         // Test get_by_poly_yes_hash
         let market = state.get_by_poly_yes_hash(fxhash_str(&poly_yes))
             .expect("Should find by Poly YES hash");
-        assert!(market.pair.is_some());
+        assert!(market.pair().is_some());
 
         // Test id lookups
         assert_eq!(state.id_by_kalshi_hash(fxhash_str(&kalshi_ticker)), Some(id));
@@ -881,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_global_state_multiple_markets() {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         // Add multiple markets
         for i in 0..10 {
@@ -901,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_global_state_update_prices() {
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         let pair = make_test_pair("003");
         let id = state.add_pair(pair).unwrap();
@@ -1091,7 +1117,7 @@ mod tests {
     #[test]
     fn test_full_arb_flow() {
         // Simulate the full flow: add market, update prices, detect arb
-        let mut state = GlobalState::new();
+        let state = GlobalState::new();
 
         // 1. Add market during discovery
         let pair = MarketPair {
@@ -1116,14 +1142,14 @@ mod tests {
         // 2. Simulate WebSocket updates setting prices
         // Kalshi update
         let kalshi_hash = fxhash_str(&kalshi_ticker);
-        if let Some(id) = state.kalshi_to_id.get(&kalshi_hash) {
-            state.markets[*id as usize].kalshi.store(55, 50, 500, 600);
+        if let Some(id) = state.kalshi_to_id.read().get(&kalshi_hash).copied() {
+            state.markets[id as usize].kalshi.store(55, 50, 500, 600);
         }
 
         // Polymarket update
         let poly_hash = fxhash_str(&poly_yes_token);
-        if let Some(id) = state.poly_yes_to_id.get(&poly_hash) {
-            state.markets[*id as usize].poly.store(40, 65, 700, 800);
+        if let Some(id) = state.poly_yes_to_id.read().get(&poly_hash).copied() {
+            state.markets[id as usize].poly.store(40, 65, 700, 800);
         }
 
         // 3. Check for arbs (threshold = 100 cents = $1.00)

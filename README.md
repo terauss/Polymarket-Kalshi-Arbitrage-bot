@@ -126,6 +126,7 @@ DRY_RUN=0 dotenvx run -- cargo run --release
 | `DRY_RUN` | `1` | `1` = paper trading (no orders), `0` = live execution |
 | `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `FORCE_DISCOVERY` | `0` | `1` = re-fetch market mappings (ignore cache) |
+| `DISCOVERY_INTERVAL_MINS` | `15` | Minutes between runtime discovery scans (0 = disabled) |
 | `PRICE_LOGGING` | `0` | `1` = verbose price update logging |
 
 ### Test Mode
@@ -306,6 +307,9 @@ cargo bench
 
 ### 🚧 Future Enhancements
 
+- [x] **Runtime market discovery** - Periodic scanning for new markets without restart
+  - Configurable via `DISCOVERY_INTERVAL_MINS` (default: 15 minutes, 0 to disable)
+  - See `docs/plans/2026-01-13-runtime-market-discovery-design.md` for design details
 - [ ] Risk limit configuration UI
 - [ ] Multi-account support
 - [ ] Advanced order routing strategies

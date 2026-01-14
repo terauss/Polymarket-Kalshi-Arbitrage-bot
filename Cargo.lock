@@ -2635,6 +2635,7 @@ dependencies = [
  "hex",
  "hmac",
  "nonzero_ext",
+ "parking_lot",
  "pkcs1",
  "rand 0.8.5",
  "reqwest",
