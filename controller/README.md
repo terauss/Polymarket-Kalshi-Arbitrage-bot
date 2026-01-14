@@ -128,6 +128,17 @@ DRY_RUN=0 dotenvx run -- cargo run --release
 | `FORCE_DISCOVERY` | `0` | `1` = re-fetch market mappings (ignore cache) |
 | `PRICE_LOGGING` | `0` | `1` = verbose price update logging |
 
+### Remote Trader (Controller ↔ Trader on separate machines)
+
+These variables control **where the controller listens** (IP/port) and which platforms the trader should initialize.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REMOTE_TRADER_BIND` | *(none)* | If set, enables remote-trader mode and binds the controller WebSocket server to this `IP:PORT` (example: `0.0.0.0:9001`, `127.0.0.1:9001`). |
+| `REMOTE_TRADER` | `0` | Alternative enable flag for remote-trader mode (`1`/`true`). If `REMOTE_TRADER_BIND` is not set, defaults bind to `0.0.0.0:9001`. |
+| `TRADER_PLATFORMS` | `kalshi,polymarket` | Comma-separated list: `kalshi`, `polymarket` (or `poly`). This is what the controller sends in the trader `init` message. |
+| `REMOTE_SMOKE_TEST` | `0` | If `1`, controller runs only the WS server, waits for a trader to connect, sends one synthetic `execute`, then exits (for verifying networking). |
+
 ### Test Mode
 
 | Variable | Default | Description |
@@ -178,6 +189,40 @@ DRY_RUN=0 dotenvx run -- cargo run --release
 ```bash
 # Full logging, dry run
 RUST_LOG=debug DRY_RUN=1 dotenvx run -- cargo run --release
+```
+
+### Remote Trader Mode (two computers)
+
+In this mode the **controller hosts a WebSocket server** and the **trader connects as a client** (this is closest to “controller on one machine, trader on another”).
+
+**Controller machine (server):**
+
+```bash
+# Listen on all interfaces so the other machine can reach it
+DRY_RUN=1 REMOTE_TRADER_BIND=0.0.0.0:9001 RUST_LOG=info cargo run --release
+```
+
+**Trader machine (client):**
+
+```bash
+# Point to the controller’s reachable IP address + port
+DRY_RUN=1 WEBSOCKET_URL=ws://<CONTROLLER_IP>:9001 RUST_LOG=info cargo run -p remote-trader --release
+```
+
+Notes:
+- If you bind the controller to `127.0.0.1`, only the same machine can connect.
+- Ensure the controller machine firewall allows inbound TCP on the chosen port (example: `9001`).
+
+### Remote Smoke Test (networking-only)
+
+This is a quick way to validate you can connect and pass an `execute` message without requiring market connections.
+
+```bash
+# Terminal A (controller)
+DRY_RUN=1 REMOTE_SMOKE_TEST=1 REMOTE_TRADER_BIND=127.0.0.1:9001 RUST_LOG=info cargo run
+
+# Terminal B (trader)
+DRY_RUN=1 ONE_SHOT=1 WEBSOCKET_URL=ws://127.0.0.1:9001 RUST_LOG=info cargo run -p remote-trader
 ```
 
 ### Test Arbitrage Execution
