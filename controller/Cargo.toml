@@ -38,4 +38,5 @@ wide = "0.7"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 hex = "0.4"
+remote-trader = { path = "../trader" }
 

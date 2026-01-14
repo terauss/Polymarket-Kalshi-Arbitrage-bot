@@ -32,6 +32,9 @@ mod paths;
 mod polymarket;
 mod polymarket_clob;
 mod position_tracker;
+mod remote_execution;
+mod remote_protocol;
+mod remote_trader;
 mod types;
 
 use anyhow::{Context, Result};
@@ -48,6 +51,9 @@ use execution::{ExecutionEngine, create_execution_channel, run_execution_loop};
 use kalshi::{KalshiConfig, KalshiApiClient};
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
 use position_tracker::{PositionTracker, create_position_channel, position_writer_loop};
+use crate::remote_execution::{RemoteExecutor, run_remote_execution_loop};
+use crate::remote_protocol::Platform as WsPlatform;
+use crate::remote_trader::RemoteTraderServer;
 use types::{GlobalState, PriceCents};
 
 /// Polymarket CLOB API host
@@ -55,18 +61,90 @@ const POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 /// Polygon chain ID
 const POLYGON_CHAIN_ID: u64 = 137;
 
+fn parse_bool_env(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| v == "1" || v.to_lowercase() == "true" || v.to_lowercase() == "yes")
+        .unwrap_or(false)
+}
+
+fn parse_ws_platforms() -> Vec<WsPlatform> {
+    // Default to both platforms.
+    let raw = std::env::var("TRADER_PLATFORMS").unwrap_or_else(|_| "kalshi,polymarket".to_string());
+    raw.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter_map(|s| match s.as_str() {
+            "kalshi" => Some(WsPlatform::Kalshi),
+            "polymarket" | "poly" => Some(WsPlatform::Polymarket),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("arb_bot=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
     // Load environment variables from `.env` (supports workspace-root `.env`)
     paths::load_dotenv();
+
+    // === Remote smoke test mode ===
+    // Runs only the controller-hosted WS server, waits for a trader to connect,
+    // sends a single synthetic execute message, then exits.
+    if parse_bool_env("REMOTE_SMOKE_TEST") {
+        let dry_run = std::env::var("DRY_RUN").map(|v| v == "1" || v == "true").unwrap_or(true);
+        let bind: std::net::SocketAddr = std::env::var("REMOTE_TRADER_BIND")
+            .unwrap_or_else(|_| "127.0.0.1:9001".to_string())
+            .parse()
+            .context("REMOTE_TRADER_BIND must be a SocketAddr, e.g. 127.0.0.1:9001")?;
+
+        let platforms = parse_ws_platforms();
+        let remote_server = RemoteTraderServer::new(bind, platforms, dry_run);
+        let trader_handle = remote_server.handle();
+        tokio::spawn(async move {
+            if let Err(e) = remote_server.run().await {
+                error!("[REMOTE] server error: {}", e);
+            }
+        });
+
+        info!("[REMOTE] Waiting for trader connection...");
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+        loop {
+            if trader_handle.is_connected().await {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                anyhow::bail!("Timed out waiting for trader to connect");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+
+        warn!("[REMOTE] Trader connected; sending synthetic execute");
+        trader_handle
+            .send(crate::remote_protocol::IncomingMessage::Execute {
+                market_id: 0,
+                arb_type: crate::remote_protocol::ArbType::PolyYesKalshiNo,
+                yes_price: 40,
+                no_price: 50,
+                yes_size: 1000,
+                no_size: 1000,
+                pair_id: Some("smoke-test".to_string()),
+                description: Some("Smoke Test Market".to_string()),
+                kalshi_market_ticker: Some("KXSMOKE-YES".to_string()),
+                poly_yes_token: Some("0x_smoke_yes".to_string()),
+                poly_no_token: Some("0x_smoke_no".to_string()),
+            })
+            .await?;
+
+        info!("[REMOTE] Sent execute; sleeping briefly then exiting");
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        return Ok(());
+    }
 
     info!("🚀 Prediction Market Arbitrage System v2.0");
     info!("   Profit threshold: <{:.1}¢ ({:.1}% minimum profit)",
@@ -194,16 +272,44 @@ async fn main() -> Result<()> {
     let threshold_cents: PriceCents = ((ARB_THRESHOLD * 100.0).round() as u16).max(1);
     info!("   Execution threshold: {} cents", threshold_cents);
 
-    let engine = Arc::new(ExecutionEngine::new(
-        kalshi_api.clone(),
-        poly_async,
-        state.clone(),
-        circuit_breaker.clone(),
-        position_channel,
-        dry_run,
-    ));
+    // Remote trader mode: controller hosts a WS server and forwards executions.
+    // Set REMOTE_TRADER_BIND (e.g. "0.0.0.0:9001") to enable.
+    let remote_bind = std::env::var("REMOTE_TRADER_BIND").ok();
+    let remote_mode = remote_bind.is_some() || parse_bool_env("REMOTE_TRADER");
 
-    let exec_handle = tokio::spawn(run_execution_loop(exec_rx, engine));
+    let exec_handle = if remote_mode {
+        let bind = remote_bind
+            .unwrap_or_else(|| "0.0.0.0:9001".to_string())
+            .parse()
+            .context("REMOTE_TRADER_BIND must be a SocketAddr, e.g. 0.0.0.0:9001")?;
+        let platforms = parse_ws_platforms();
+
+        let remote_server = RemoteTraderServer::new(bind, platforms, dry_run);
+        let trader_handle = remote_server.handle();
+        tokio::spawn(async move {
+            if let Err(e) = remote_server.run().await {
+                error!("[REMOTE] server error: {}", e);
+            }
+        });
+
+        let remote_exec = Arc::new(RemoteExecutor::new(
+            state.clone(),
+            circuit_breaker.clone(),
+            trader_handle,
+            dry_run,
+        ));
+        tokio::spawn(run_remote_execution_loop(exec_rx, remote_exec))
+    } else {
+        let engine = Arc::new(ExecutionEngine::new(
+            kalshi_api.clone(),
+            poly_async,
+            state.clone(),
+            circuit_breaker.clone(),
+            position_channel,
+            dry_run,
+        ));
+        tokio::spawn(run_execution_loop(exec_rx, engine))
+    };
 
     // === TEST MODE: Synthetic arbitrage injection ===
     // TEST_ARB=1 to enable, TEST_ARB_TYPE=poly_yes_kalshi_no|kalshi_yes_poly_no|poly_only|kalshi_only

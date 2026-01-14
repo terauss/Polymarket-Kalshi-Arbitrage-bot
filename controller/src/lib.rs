@@ -13,4 +13,7 @@ pub mod paths;
 pub mod polymarket;
 pub mod polymarket_clob;
 pub mod position_tracker;
+pub mod remote_execution;
+pub mod remote_protocol;
+pub mod remote_trader;
 pub mod types;

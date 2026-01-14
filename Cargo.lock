@@ -511,6 +511,7 @@ dependencies = [
  "nonzero_ext",
  "pkcs1",
  "rand 0.8.5",
+ "remote-trader",
  "reqwest",
  "rsa",
  "rustc-hash",

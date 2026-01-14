@@ -127,10 +127,14 @@ impl ExecutionEngine for PolymarketEngine {
             });
         }
 
-        // TODO: Map market_id to actual Polymarket token IDs
-        // For now, using placeholders - in production you'd have a market mapping
-        let yes_token = format!("YES-TOKEN-{}", market_id);
-        let no_token = format!("NO-TOKEN-{}", market_id);
+        let yes_token = request
+            .poly_yes_token
+            .as_deref()
+            .unwrap_or("UNKNOWN-POLY-YES-TOKEN");
+        let no_token = request
+            .poly_no_token
+            .as_deref()
+            .unwrap_or("UNKNOWN-POLY-NO-TOKEN");
 
         // Determine execution based on arb type
         let (yes_filled, no_filled, yes_cost, no_cost) = match request.arb_type {

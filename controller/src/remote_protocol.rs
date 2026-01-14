@@ -1,4 +1,7 @@
-//! Protocol definitions for WebSocket communication between host and trader
+//! WebSocket protocol (controller <-> trader).
+//!
+//! This intentionally mirrors `trader::protocol` so the controller can run
+//! as a standalone binary on a separate machine without linking to trader code.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +23,7 @@ pub enum ArbType {
     KalshiOnly,
 }
 
-/// Incoming messages from host to trader
+/// Incoming messages from host (controller) to trader
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
@@ -30,6 +33,7 @@ pub enum IncomingMessage {
         #[serde(default)]
         dry_run: bool,
     },
+
     #[serde(rename = "execute")]
     Execute {
         market_id: u16,
@@ -39,31 +43,30 @@ pub enum IncomingMessage {
         yes_size: u16,
         no_size: u16,
 
-        // Optional metadata so the trader can execute without a shared DB.
-        #[serde(default)]
+        // Optional metadata so trader can execute without a shared DB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pair_id: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         kalshi_market_ticker: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         poly_yes_token: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         poly_no_token: Option<String>,
     },
+
     #[serde(rename = "ping")]
-    Ping {
-        timestamp: u64,
-    },
+    Ping { timestamp: u64 },
+
     #[serde(rename = "pong")]
-    Pong {
-        timestamp: u64,
-    },
+    Pong { timestamp: u64 },
+
     #[serde(rename = "status")]
     Status,
 }
 
-/// Outgoing messages from trader to host
+/// Outgoing messages from trader to host (controller)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
@@ -74,6 +77,7 @@ pub enum OutgoingMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
     #[serde(rename = "execution_result")]
     ExecutionResult {
         market_id: u16,
@@ -83,22 +87,21 @@ pub enum OutgoingMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
     #[serde(rename = "ping")]
-    Ping {
-        timestamp: u64,
-    },
+    Ping { timestamp: u64 },
+
     #[serde(rename = "pong")]
-    Pong {
-        timestamp: u64,
-    },
+    Pong { timestamp: u64 },
+
     #[serde(rename = "status")]
     Status {
         connected: bool,
         platforms: Vec<Platform>,
         dry_run: bool,
     },
+
     #[serde(rename = "error")]
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
+

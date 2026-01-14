@@ -94,9 +94,14 @@ impl ExecutionEngine for KalshiEngine {
             });
         }
 
-        // TODO: Map market_id to actual Kalshi ticker
-        // For now, using a placeholder - in production you'd have a market mapping
-        let ticker = format!("MARKET-{}", market_id);
+        let ticker = request
+            .kalshi_market_ticker
+            .as_deref()
+            .unwrap_or_else(|| {
+                // Backward-compatible fallback for older controllers.
+                // Real execution requires the real ticker, but dry_run can still log.
+                "UNKNOWN-KALSHI-TICKER"
+            });
 
         // Determine execution based on arb type
         let (yes_filled, no_filled, yes_cost, no_cost) = match request.arb_type {

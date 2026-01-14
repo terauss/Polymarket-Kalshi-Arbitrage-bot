@@ -24,15 +24,23 @@ pub struct OrderRequest {
     pub no_price: u16,
     pub yes_size: u16,
     pub no_size: u16,
+
+    // Optional metadata provided by controller.
+    pub pair_id: Option<String>,
+    pub description: Option<String>,
+    pub kalshi_market_ticker: Option<String>,
+    pub poly_yes_token: Option<String>,
+    pub poly_no_token: Option<String>,
 }
 
 impl OrderRequest {
     /// Calculate profit in cents
     pub fn profit_cents(&self) -> i16 {
-        let yes_cost = (self.yes_price as i16 * self.yes_size as i16) / 100;
-        let no_cost = (self.no_price as i16 * self.no_size as i16) / 100;
-        let total_payout = (self.yes_size + self.no_size) as i16;
-        total_payout - yes_cost - no_cost
+        // These requests are expressed primarily in "cents per contract" (price) and
+        // "cents notional available" (size). For safety + logging we compute a
+        // per-contract approximate profit that cannot overflow.
+        let profit = 100i64 - (self.yes_price as i64 + self.no_price as i64);
+        profit.clamp(i16::MIN as i64, i16::MAX as i64) as i16
     }
 }
 
@@ -86,5 +94,6 @@ pub async fn create_engines(
     Ok(engines)
 }
 
+pub mod dry_run;
 pub mod kalshi;
 pub mod polymarket;

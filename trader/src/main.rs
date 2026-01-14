@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
     paths::load_dotenv();
 
     info!("[MAIN] Starting remote trader...");
+    let one_shot = std::env::var("ONE_SHOT")
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false);
 
     // Load configuration
     let config = Arc::new(Config::from_env().context("Failed to load configuration")?);
@@ -74,10 +77,15 @@ async fn main() -> Result<()> {
                                     heartbeat.record_pong();
                                 }
                                 Some(msg) => {
+                                    let is_execute = matches!(msg, IncomingMessage::Execute { .. });
                                     let response = trader.handle_message(msg).await;
                                     if outgoing_tx.send(response).is_err() {
                                         warn!("[MAIN] Failed to send response - connection may be closed");
                                         connection_healthy = false;
+                                    }
+                                    if one_shot && is_execute {
+                                        info!("[MAIN] ONE_SHOT enabled; exiting after first execute");
+                                        return Ok(());
                                     }
                                 }
                                 None => {

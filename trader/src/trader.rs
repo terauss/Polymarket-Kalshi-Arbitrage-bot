@@ -52,6 +52,11 @@ impl Trader {
                 no_price,
                 yes_size,
                 no_size,
+                pair_id,
+                description,
+                kalshi_market_ticker,
+                poly_yes_token,
+                poly_no_token,
             } => {
                 self.handle_execute(
                     market_id,
@@ -60,6 +65,11 @@ impl Trader {
                     no_price,
                     yes_size,
                     no_size,
+                    pair_id,
+                    description,
+                    kalshi_market_ticker,
+                    poly_yes_token,
+                    poly_no_token,
                 )
                 .await
             }
@@ -77,10 +87,19 @@ impl Trader {
     ) -> OutgoingMessage {
         info!("[TRADER] Received init request: platforms={:?}, dry_run={}", platforms, dry_run);
 
-        // Use dry_run from config if not specified in request
+        // In dry-run mode, do not require credentials. Use local dry-run engines.
         let effective_dry_run = dry_run || self.config.dry_run;
 
-        match create_engines(&platforms, &self.config).await {
+        let engines_result = if effective_dry_run {
+            Ok(platforms
+                .iter()
+                .map(|p| Box::new(crate::execution::dry_run::DryRunEngine::new(*p)) as Box<dyn ExecutionEngine>)
+                .collect())
+        } else {
+            create_engines(&platforms, &self.config).await
+        };
+
+        match engines_result {
             Ok(engines) => {
                 let platform_list: Vec<Platform> = engines.iter().map(|e| e.platform()).collect();
                 self.state = TraderState::Initialized {
@@ -118,6 +137,11 @@ impl Trader {
         no_price: u16,
         yes_size: u16,
         no_size: u16,
+        pair_id: Option<String>,
+        description: Option<String>,
+        kalshi_market_ticker: Option<String>,
+        poly_yes_token: Option<String>,
+        poly_no_token: Option<String>,
     ) -> OutgoingMessage {
         let detected_ns = self.start_time.elapsed().as_nanos() as u64;
 
@@ -154,6 +178,11 @@ impl Trader {
                     no_price,
                     yes_size,
                     no_size,
+                    pair_id,
+                    description,
+                    kalshi_market_ticker,
+                    poly_yes_token,
+                    poly_no_token,
                 };
 
                 // Determine which engine(s) to use based on arb_type
