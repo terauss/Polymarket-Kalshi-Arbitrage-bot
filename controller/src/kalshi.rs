@@ -17,7 +17,7 @@ use rsa::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::{http::Request, Message}};
 use tracing::{debug, error, info};
 
@@ -287,6 +287,16 @@ impl KalshiApiClient {
         let resp: KalshiMarketsResponse = self.get(&path).await?;
         Ok(resp.markets)
     }
+
+    /// Get markets created since a given timestamp for a series
+    pub async fn get_markets_since(&self, series_ticker: &str, since_ts: u64) -> Result<Vec<KalshiMarket>> {
+        let path = format!(
+            "/markets?series_ticker={}&min_created_ts={}&status=open&limit=100",
+            series_ticker, since_ts
+        );
+        let resp: KalshiMarketsResponse = self.get(&path).await?;
+        Ok(resp.markets)
+    }
     
     /// Generic authenticated POST request
     async fn post<T: serde::de::DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T> {
@@ -428,10 +438,11 @@ pub async fn run_ws(
     state: Arc<GlobalState>,
     exec_tx: mpsc::Sender<FastExecutionRequest>,
     threshold_cents: PriceCents,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let tickers: Vec<String> = state.markets.iter()
         .take(state.market_count())
-        .filter_map(|m| m.pair.as_ref().map(|p| p.kalshi_market_ticker.to_string()))
+        .filter_map(|m| m.pair().map(|p| p.kalshi_market_ticker.to_string()))
         .collect();
 
     if tickers.is_empty() {
@@ -479,59 +490,76 @@ pub async fn run_ws(
 
     let clock = NanoClock::new();
 
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                match serde_json::from_str::<KalshiWsMessage>(&text) {
-                    Ok(kalshi_msg) => {
-                        let ticker = kalshi_msg.msg.as_ref()
-                            .and_then(|m| m.market_ticker.as_ref());
+    loop {
+        tokio::select! {
+            biased;
 
-                        let Some(ticker) = ticker else { continue };
-                        let ticker_hash = fxhash_str(ticker);
-
-                        let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else { continue };
-                        let market = &state.markets[market_id as usize];
-
-                        match kalshi_msg.msg_type.as_str() {
-                            "orderbook_snapshot" => {
-                                if let Some(body) = &kalshi_msg.msg {
-                                    process_kalshi_snapshot(market, body);
-
-                                    // Check for arbs
-                                    let arb_mask = market.check_arbs(threshold_cents);
-                                    if arb_mask != 0 {
-                                        send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
-                                    }
-                                }
-                            }
-                            "orderbook_delta" => {
-                                if let Some(body) = &kalshi_msg.msg {
-                                    process_kalshi_delta(market, body);
-
-                                    let arb_mask = market.check_arbs(threshold_cents);
-                                    if arb_mask != 0 {
-                                        send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => {
-                        // Log at trace level - unknown message types are normal
-                        tracing::trace!("[KALSHI] WS parse error: {} (msg: {}...)", e, &text[..text.len().min(100)]);
-                    }
+            // Check shutdown signal first
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("[KALSHI] Shutdown signal received, disconnecting...");
+                    break;
                 }
             }
-            Ok(Message::Ping(data)) => {
-                let _ = write.send(Message::Pong(data)).await;
+
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<KalshiWsMessage>(&text) {
+                            Ok(kalshi_msg) => {
+                                let ticker = kalshi_msg.msg.as_ref()
+                                    .and_then(|m| m.market_ticker.as_ref());
+
+                                let Some(ticker) = ticker else { continue };
+                                let ticker_hash = fxhash_str(ticker);
+
+                                let Some(market_id) = state.kalshi_to_id.read().get(&ticker_hash).copied() else { continue };
+                                let market = &state.markets[market_id as usize];
+
+                                match kalshi_msg.msg_type.as_str() {
+                                    "orderbook_snapshot" => {
+                                        if let Some(body) = &kalshi_msg.msg {
+                                            process_kalshi_snapshot(market, body);
+
+                                            // Check for arbs
+                                            let arb_mask = market.check_arbs(threshold_cents);
+                                            if arb_mask != 0 {
+                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                            }
+                                        }
+                                    }
+                                    "orderbook_delta" => {
+                                        if let Some(body) = &kalshi_msg.msg {
+                                            process_kalshi_delta(market, body);
+
+                                            let arb_mask = market.check_arbs(threshold_cents);
+                                            if arb_mask != 0 {
+                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => {
+                                // Log at trace level - unknown message types are normal
+                                tracing::trace!("[KALSHI] WS parse error: {} (msg: {}...)", e, &text[..text.len().min(100)]);
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = write.send(Message::Pong(data)).await;
+                    }
+                    Some(Err(e)) => {
+                        error!("[KALSHI] WebSocket error: {}", e);
+                        break;
+                    }
+                    None => {
+                        break;
+                    }
+                    _ => {}
+                }
             }
-            Err(e) => {
-                error!("[KALSHI] WebSocket error: {}", e);
-                break;
-            }
-            _ => {}
         }
     }
 
