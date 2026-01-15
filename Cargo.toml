@@ -38,6 +38,7 @@ nonzero_ext = "0.3"
 arrayvec = "0.7"
 wide = "0.7"
 parking_lot = "0.12"
+regex = "1.10"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
