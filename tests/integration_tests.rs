@@ -766,7 +766,7 @@ mod infra_integration_tests {
         assert!(req.profit_cents() > 0, "Should have positive profit");
 
         // 6. Verify we can access market pair for execution
-        let pair = market.pair.as_ref().expect("Should have pair");
+        let pair = market.pair().expect("Should have pair");
         assert!(!pair.kalshi_market_ticker.is_empty());
         assert!(!pair.poly_yes_token.is_empty());
         assert!(!pair.poly_no_token.is_empty());

@@ -6,4 +6,4 @@ claude.md
 .DS_Store
 positions.json
 .discovery_cache.json
-*.pem
+*.pem.worktrees/

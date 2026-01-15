@@ -6,7 +6,10 @@
 use anyhow::Result;
 use futures_util::{stream, StreamExt};
 use governor::{Quota, RateLimiter, state::NotKeyed, clock::DefaultClock, middleware::NoOpMiddleware};
+use regex::Regex;
+use std::sync::LazyLock;
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -144,11 +147,14 @@ impl DiscoveryClient {
 
         match cached {
             Some(cache) if !cache.is_expired() => {
-                // Cache is fresh - use it directly
-                info!("📂 Loaded {} pairs from cache (age: {}s)",
-                      cache.pairs.len(), cache.age_secs());
+                // Cache is fresh - filter by enabled leagues and return
+                let age = cache.age_secs();
+                let pairs = filter_pairs_by_leagues(cache.pairs, leagues);
+                info!("📂 Loaded {} pairs from cache (age: {}s){}",
+                      pairs.len(), age,
+                      if !leagues.is_empty() { format!(" [filtered to {:?}]", leagues) } else { String::new() });
                 return DiscoveryResult {
-                    pairs: cache.pairs,
+                    pairs,
                     kalshi_events_found: 0,  // From cache
                     poly_matches: 0,
                     poly_misses: 0,
@@ -289,6 +295,11 @@ impl DiscoveryClient {
     /// Discover all market types for a single league (PARALLEL)
     /// If cache is provided, only discovers markets not already in cache
     async fn discover_league(&self, config: &LeagueConfig, cache: Option<&DiscoveryCache>) -> DiscoveryResult {
+        // Use esports discovery for leagues with poly_series_id
+        if config.poly_series_id.is_some() {
+            return self.discover_esports_league(config).await;
+        }
+
         info!("🔍 Discovering {} markets...", config.league_code);
 
         let market_types = [MarketType::Moneyline, MarketType::Spread, MarketType::Total, MarketType::Btts];
@@ -696,9 +707,160 @@ impl DiscoveryClient {
             team_suffix: team_suffix.map(|s| s.into()),
         })
     }
+
+    /// Discover esports market pairs using series-based name matching
+    async fn discover_esports_league(&self, config: &LeagueConfig) -> DiscoveryResult {
+        let series_id = match config.poly_series_id {
+            Some(id) => id,
+            None => return DiscoveryResult::default(),
+        };
+
+        info!("🎮 Discovering {} esports markets (series_id={})...", config.league_code, series_id);
+
+        // Phase 1: Build Polymarket lookup from events
+        let poly_events = match self.gamma.fetch_events_by_series(series_id).await {
+            Ok(events) => events,
+            Err(e) => {
+                warn!("Failed to fetch Polymarket events for {}: {}", config.league_code, e);
+                return DiscoveryResult {
+                    errors: vec![format!("{}: {}", config.league_code, e)],
+                    ..Default::default()
+                };
+            }
+        };
+
+        // Build lookup: (date:norm_team1:norm_team2) -> (slug, yes_token, no_token)
+        let mut poly_lookup: HashMap<String, (String, String, String)> = HashMap::new();
+
+        for event in &poly_events {
+            let slug = match &event.slug {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let title = match &event.title {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if let Some((team1, team2)) = parse_poly_event_title(title) {
+                if let Some(date) = extract_date_from_poly_slug(slug) {
+                    let norm1 = normalize_esports_team(&team1);
+                    let norm2 = normalize_esports_team(&team2);
+
+                    // Find moneyline market (no -game, -total, -map suffix)
+                    if let Some(markets) = &event.markets {
+                        for market in markets {
+                            let market_slug = market.slug.as_deref().unwrap_or("");
+                            let is_moneyline = !market_slug.contains("-game")
+                                && !market_slug.contains("-total")
+                                && !market_slug.contains("-map-")
+                                && !market_slug.contains("-handicap");
+
+                            if is_moneyline {
+                                if let Some(tokens) = &market.clob_token_ids {
+                                    if let Ok(ids) = serde_json::from_str::<Vec<String>>(tokens) {
+                                        if ids.len() >= 2 {
+                                            let key1 = format!("{}:{}:{}", date, norm1, norm2);
+                                            let key2 = format!("{}:{}:{}", date, norm2, norm1);
+                                            poly_lookup.insert(key1, (slug.clone(), ids[0].clone(), ids[1].clone()));
+                                            poly_lookup.insert(key2, (slug.clone(), ids[0].clone(), ids[1].clone()));
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("  📊 Built {} Polymarket lookup entries", poly_lookup.len() / 2);
+
+        // Phase 2: Fetch and match Kalshi events
+        let kalshi_events = {
+            let _permit = self.kalshi_semaphore.acquire().await.ok();
+            self.kalshi_limiter.until_ready().await;
+            match self.kalshi.get_events(config.kalshi_series_game, 50).await {
+                Ok(events) => events,
+                Err(e) => {
+                    warn!("Failed to fetch Kalshi events for {}: {}", config.league_code, e);
+                    return DiscoveryResult {
+                        errors: vec![format!("{}: {}", config.league_code, e)],
+                        ..Default::default()
+                    };
+                }
+            }
+        };
+
+        let mut pairs = Vec::new();
+
+        for event in &kalshi_events {
+            if let Some((team1, team2)) = parse_esports_kalshi_title(&event.title) {
+                if let Some(date) = parse_kalshi_event_ticker(&event.event_ticker)
+                    .map(|p| kalshi_date_to_iso(&p.date))
+                {
+                    let norm1 = normalize_esports_team(&team1);
+                    let norm2 = normalize_esports_team(&team2);
+                    let key = format!("{}:{}:{}", date, norm1, norm2);
+
+                    if let Some((slug, yes_token, no_token)) = poly_lookup.get(&key) {
+                        // Get Kalshi markets for this event
+                        let markets = {
+                            let _permit = self.kalshi_semaphore.acquire().await.ok();
+                            self.kalshi_limiter.until_ready().await;
+                            self.kalshi.get_markets(&event.event_ticker).await.unwrap_or_default()
+                        };
+
+                        for market in markets {
+                            let team_suffix = extract_team_suffix(&market.ticker);
+
+                            pairs.push(MarketPair {
+                                pair_id: format!("{}-{}", slug, market.ticker).into(),
+                                league: config.league_code.into(),
+                                market_type: MarketType::Moneyline,
+                                description: format!("{} - {}", event.title, market.title).into(),
+                                kalshi_event_ticker: event.event_ticker.clone().into(),
+                                kalshi_market_ticker: market.ticker.into(),
+                                poly_slug: slug.clone().into(),
+                                poly_yes_token: yes_token.clone().into(),
+                                poly_no_token: no_token.clone().into(),
+                                line_value: market.floor_strike,
+                                team_suffix: team_suffix.map(|s| s.into()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if !pairs.is_empty() {
+            info!("  ✅ {} {}: matched {} pairs", config.league_code, "esports", pairs.len());
+        }
+
+        DiscoveryResult {
+            pairs,
+            kalshi_events_found: kalshi_events.len(),
+            poly_matches: poly_lookup.len() / 2,
+            poly_misses: 0,
+            errors: vec![],
+        }
+    }
 }
 
 // === Helpers ===
+
+/// Filter market pairs by enabled leagues
+/// If leagues is empty, returns all pairs (no filtering)
+fn filter_pairs_by_leagues(pairs: Vec<MarketPair>, leagues: &[&str]) -> Vec<MarketPair> {
+    if leagues.is_empty() {
+        return pairs;
+    }
+    pairs.into_iter()
+        .filter(|p| leagues.iter().any(|l| *l == &*p.league))
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 struct ParsedKalshiTicker {
@@ -828,10 +990,133 @@ fn extract_team_suffix(ticker: &str) -> Option<String> {
     splits.next().map(|s| s.to_uppercase())
 }
 
+// === Esports Discovery Helpers ===
+
+// Static regex patterns compiled once for performance (avoids recompilation on each call)
+static RE_ESPORTS_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\s*(esports|gaming|team|clan)\s*$").unwrap()
+});
+static RE_ESPORTS_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(team|clan)\s+").unwrap()
+});
+static RE_POLY_TITLE_PARENS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*\(").unwrap()
+});
+static RE_POLY_TITLE_DASH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*-").unwrap()
+});
+static RE_POLY_TITLE_FALLBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+?)(?:\s*\(|\s*-|$)").unwrap()
+});
+static RE_KALSHI_TITLE_COLON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+)$").unwrap()
+});
+static RE_KALSHI_TITLE_FALLBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+)$").unwrap()
+});
+
+/// Normalize esports team name for matching
+/// "FURIA Esports" -> "furia", "Cloud9 New York" -> "cloud9-new-york"
+fn normalize_esports_team(name: &str) -> String {
+    // Convert to lowercase first, then remove common suffixes and prefixes
+    let lower = name.to_lowercase();
+
+    // Remove common suffixes (at the end)
+    let cleaned = RE_ESPORTS_SUFFIX.replace(&lower, "").to_string();
+
+    // Remove common prefixes (at the start, like "Team Liquid" -> "Liquid")
+    let cleaned = RE_ESPORTS_PREFIX.replace(&cleaned, "").to_string();
+
+    // Also remove periods and apostrophes
+    let cleaned = cleaned.replace(".", "").replace("'", "");
+
+    // Join words with hyphens
+    cleaned.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
+/// Parse Polymarket event title to extract team names
+/// "Counter-Strike: Team1 vs Team2 (BO3)" -> Some((team1, team2))
+fn parse_poly_event_title(title: &str) -> Option<(String, String)> {
+    // Helper to extract teams from captures
+    fn extract_teams(caps: &regex::Captures) -> Option<(String, String)> {
+        Some((
+            caps.get(1)?.as_str().trim().to_string(),
+            caps.get(2)?.as_str().trim().to_string(),
+        ))
+    }
+
+    // Pattern: "Game: Team1 vs Team2 (BON)"
+    if let Some(caps) = RE_POLY_TITLE_PARENS.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
+    }
+
+    // Fallback: "Game: Team1 vs Team2 - Tournament"
+    if let Some(caps) = RE_POLY_TITLE_DASH.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
+    }
+
+    // Final fallback: just "Team1 vs Team2" without colon prefix
+    if let Some(caps) = RE_POLY_TITLE_FALLBACK.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
+    }
+
+    None
+}
+
+/// Extract date from Polymarket slug
+/// "cs2-team1-team2-2026-01-16" -> Some("2026-01-16")
+fn extract_date_from_poly_slug(slug: &str) -> Option<String> {
+    let parts: Vec<&str> = slug.split('-').collect();
+    if parts.len() >= 4 {
+        let year = parts[parts.len() - 3];
+        let month = parts[parts.len() - 2];
+        let day = parts[parts.len() - 1];
+
+        if year.len() == 4 && month.len() == 2 && day.len() == 2 {
+            return Some(format!("{}-{}-{}", year, month, day));
+        }
+    }
+    None
+}
+
+/// Parse Kalshi esports event title
+/// "Tournament: Team1 vs. Team2" -> Some((team1, team2))
+fn parse_esports_kalshi_title(title: &str) -> Option<(String, String)> {
+    // Helper to extract teams from captures
+    fn extract_teams(caps: &regex::Captures) -> Option<(String, String)> {
+        Some((
+            caps.get(1)?.as_str().trim().to_string(),
+            caps.get(2)?.as_str().trim().to_string(),
+        ))
+    }
+
+    // Pattern: "Tournament: Team1 vs. Team2"
+    if let Some(caps) = RE_KALSHI_TITLE_COLON.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
+    }
+
+    // Fallback: just "Team1 vs Team2"
+    if let Some(caps) = RE_KALSHI_TITLE_FALLBACK.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_kalshi_ticker() {
         let parsed = parse_kalshi_event_ticker("KXEPLGAME-25DEC27CFCAVL").unwrap();
@@ -839,10 +1124,51 @@ mod tests {
         assert_eq!(parsed.team1, "CFC");
         assert_eq!(parsed.team2, "AVL");
     }
-    
+
     #[test]
     fn test_kalshi_date_to_iso() {
         assert_eq!(kalshi_date_to_iso("25DEC27"), "2025-12-27");
         assert_eq!(kalshi_date_to_iso("25JAN01"), "2025-01-01");
+    }
+
+    #[test]
+    fn test_normalize_esports_team() {
+        assert_eq!(normalize_esports_team("FURIA Esports"), "furia");
+        assert_eq!(normalize_esports_team("Cloud9 New York"), "cloud9-new-york");
+        assert_eq!(normalize_esports_team("Team Liquid"), "liquid");
+        assert_eq!(normalize_esports_team("G2"), "g2");
+        assert_eq!(normalize_esports_team("BetBoom Team"), "betboom");
+        assert_eq!(normalize_esports_team("Gen.G"), "geng");
+    }
+
+    #[test]
+    fn test_parse_poly_event_title() {
+        let (t1, t2) = parse_poly_event_title("Counter-Strike: FURIA vs 9INE (BO3)").unwrap();
+        assert_eq!(t1, "FURIA");
+        assert_eq!(t2, "9INE");
+
+        let (t1, t2) = parse_poly_event_title("LoL: T1 vs DRX (BO5) - LCK Finals").unwrap();
+        assert_eq!(t1, "T1");
+        assert_eq!(t2, "DRX");
+    }
+
+    #[test]
+    fn test_extract_date_from_poly_slug() {
+        assert_eq!(
+            extract_date_from_poly_slug("cs2-furia-9ine-2026-01-16"),
+            Some("2026-01-16".to_string())
+        );
+        assert_eq!(
+            extract_date_from_poly_slug("lol-t1-drx-2026-01-18"),
+            Some("2026-01-18".to_string())
+        );
+        assert_eq!(extract_date_from_poly_slug("invalid"), None);
+    }
+
+    #[test]
+    fn test_parse_esports_kalshi_title() {
+        let (t1, t2) = parse_esports_kalshi_title("BLAST Bounty 2026: FURIA vs. 9INE").unwrap();
+        assert_eq!(t1, "FURIA");
+        assert_eq!(t2, "9INE");
     }
 }
