@@ -100,4 +100,4 @@ Position Tracking (position_tracker.rs)
 
 ## Supported Markets
 
-Soccer (EPL, Bundesliga, La Liga, Serie A, Ligue 1, UCL, UEL, EFL Championship), NBA, NFL, NHL, MLB, MLS, NCAAF
+Soccer (EPL, Bundesliga, La Liga, Serie A, Ligue 1, UCL, UEL, EFL Championship), NBA, NFL, NHL, MLB, MLS, NCAAF, Esports (CS2, LoL, CoD)
