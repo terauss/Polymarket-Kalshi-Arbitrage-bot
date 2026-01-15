@@ -221,6 +221,7 @@ pub async fn run_ws(
     exec_tx: mpsc::Sender<FastExecutionRequest>,
     threshold_cents: PriceCents,
     mut shutdown_rx: watch::Receiver<bool>,
+    clock: Arc<NanoClock>,
 ) -> Result<()> {
     let tokens: Vec<String> = state.markets.iter()
         .take(state.market_count())
@@ -251,7 +252,6 @@ pub async fn run_ws(
     write.send(Message::Text(serde_json::to_string(&subscribe_msg)?)).await?;
     info!("[POLY] Subscribed to {} tokens", tokens.len());
 
-    let clock = NanoClock::new();
     let mut ping_interval = interval(Duration::from_secs(POLY_PING_INTERVAL_SECS));
     let mut last_message = Instant::now();
 
@@ -282,7 +282,7 @@ pub async fn run_ws(
                         // Try book snapshot first
                         if let Ok(books) = serde_json::from_str::<Vec<BookSnapshot>>(&text) {
                             for book in &books {
-                                process_book(&state, book, &exec_tx, threshold_cents, &clock).await;
+                                process_book(&state, book, &exec_tx, threshold_cents, &*clock).await;
                             }
                         }
                         // Try price change event
@@ -290,7 +290,7 @@ pub async fn run_ws(
                             if event.event_type.as_deref() == Some("price_change") {
                                 if let Some(changes) = &event.price_changes {
                                     for change in changes {
-                                        process_price_change(&state, change, &exec_tx, threshold_cents, &clock).await;
+                                        process_price_change(&state, change, &exec_tx, threshold_cents, &*clock).await;
                                     }
                                 }
                             }
