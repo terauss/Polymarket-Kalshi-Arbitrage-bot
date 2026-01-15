@@ -54,7 +54,7 @@ pub struct ExecutionEngine {
     circuit_breaker: Arc<CircuitBreaker>,
     position_channel: PositionChannel,
     in_flight: Arc<[AtomicU64; 8]>,
-    clock: NanoClock,
+    clock: Arc<NanoClock>,
     pub dry_run: bool,
     test_mode: bool,
 }
@@ -67,6 +67,7 @@ impl ExecutionEngine {
         circuit_breaker: Arc<CircuitBreaker>,
         position_channel: PositionChannel,
         dry_run: bool,
+        clock: Arc<NanoClock>,
     ) -> Self {
         let test_mode = std::env::var("TEST_ARB")
             .map(|v| v == "1" || v == "true")
@@ -79,7 +80,7 @@ impl ExecutionEngine {
             circuit_breaker,
             position_channel,
             in_flight: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
-            clock: NanoClock::new(),
+            clock,
             dry_run,
             test_mode,
         }
@@ -653,4 +654,98 @@ pub async fn run_execution_loop(
     }
 
     info!("[EXEC] Execution engine stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_clock_latency_accuracy() {
+        // Create a shared clock (simulating what main.rs does)
+        let clock = Arc::new(NanoClock::new());
+
+        // Simulate detection time from WebSocket handler
+        let detected_ns = clock.now_ns();
+
+        // Simulate some processing delay
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Simulate execution engine calculating latency
+        let execution_ns = clock.now_ns();
+        let latency_ns = execution_ns - detected_ns;
+
+        // Latency should be approximately 5ms (5_000_000 ns), with some tolerance
+        // At minimum it should be > 4ms and < 50ms
+        assert!(
+            latency_ns > 4_000_000,
+            "Latency too low: {}ns (expected > 4ms)",
+            latency_ns
+        );
+        assert!(
+            latency_ns < 50_000_000,
+            "Latency too high: {}ns (expected < 50ms)",
+            latency_ns
+        );
+    }
+
+    #[test]
+    fn test_shared_clock_across_threads() {
+        use std::sync::mpsc;
+
+        let clock = Arc::new(NanoClock::new());
+
+        // Channel to send detected_ns from "WebSocket thread" to "execution thread"
+        let (tx, rx) = mpsc::channel();
+
+        // Simulate WebSocket handler in another thread
+        let ws_clock = clock.clone();
+        let handle = std::thread::spawn(move || {
+            let detected_ns = ws_clock.now_ns();
+            tx.send(detected_ns).unwrap();
+        });
+
+        handle.join().unwrap();
+        let detected_ns = rx.recv().unwrap();
+
+        // Small delay
+        std::thread::sleep(std::time::Duration::from_micros(100));
+
+        // Execution thread calculates latency
+        let latency_ns = clock.now_ns() - detected_ns;
+
+        // Latency should be positive and reasonable (not billions of ns from clock mismatch)
+        assert!(latency_ns > 0, "Latency should be positive");
+        assert!(
+            latency_ns < 100_000_000, // < 100ms
+            "Latency unreasonably high: {}ns - clock sync issue?",
+            latency_ns
+        );
+    }
+
+    #[test]
+    fn test_independent_clocks_would_fail() {
+        // This test demonstrates why separate clocks are problematic
+        // Two clocks created at different times have different baselines
+
+        let clock1 = NanoClock::new();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let clock2 = NanoClock::new();
+
+        // Get "detection time" from clock1
+        let detected_ns = clock1.now_ns();
+
+        // Get "execution time" from clock2 (wrong clock!)
+        let execution_ns = clock2.now_ns();
+
+        // The "latency" is nonsensical - execution_ns < detected_ns because
+        // clock2 started later and has a smaller elapsed time
+        // This would cause underflow or negative latency in real code
+        assert!(
+            execution_ns < detected_ns,
+            "This test shows the bug: clock2 ({}) < clock1 ({}) due to different start times",
+            execution_ns,
+            detected_ns
+        );
+    }
 }

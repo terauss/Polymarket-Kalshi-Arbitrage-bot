@@ -432,6 +432,7 @@ pub async fn run_ws(
     exec_tx: mpsc::Sender<FastExecutionRequest>,
     threshold_cents: PriceCents,
     mut shutdown_rx: watch::Receiver<bool>,
+    clock: Arc<NanoClock>,
 ) -> Result<()> {
     let tickers: Vec<String> = state.markets.iter()
         .take(state.market_count())
@@ -481,8 +482,6 @@ pub async fn run_ws(
     write.send(Message::Text(serde_json::to_string(&subscribe_msg)?)).await?;
     info!("[KALSHI] Subscribed to {} markets", tickers.len());
 
-    let clock = NanoClock::new();
-
     loop {
         tokio::select! {
             biased;
@@ -517,7 +516,7 @@ pub async fn run_ws(
                                             // Check for arbs
                                             let arb_mask = market.check_arbs(threshold_cents);
                                             if arb_mask != 0 {
-                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &*clock).await;
                                             }
                                         }
                                     }
@@ -527,7 +526,7 @@ pub async fn run_ws(
 
                                             let arb_mask = market.check_arbs(threshold_cents);
                                             if arb_mask != 0 {
-                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                                send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &*clock).await;
                                             }
                                         }
                                     }

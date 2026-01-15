@@ -286,6 +286,9 @@ async fn main() -> Result<()> {
     let threshold_cents: PriceCents = ((ARB_THRESHOLD * 100.0).round() as u16).max(1);
     info!("   Execution threshold: {} cents", threshold_cents);
 
+    // Shared clock for accurate latency measurement across all components
+    let clock = Arc::new(execution::NanoClock::new());
+
     let engine = Arc::new(ExecutionEngine::new(
         kalshi_api.clone(),
         poly_async,
@@ -293,6 +296,7 @@ async fn main() -> Result<()> {
         circuit_breaker.clone(),
         position_channel,
         dry_run,
+        clock.clone(),
     ));
 
     let exec_handle = tokio::spawn(run_execution_loop(exec_rx, engine));
@@ -304,6 +308,7 @@ async fn main() -> Result<()> {
         let test_state = state.clone();
         let test_exec_tx = exec_tx.clone();
         let test_dry_run = dry_run;
+        let test_clock = clock.clone();
 
         // Parse arb type from environment (default: poly_yes_kalshi_no)
         let arb_type_str = std::env::var("TEST_ARB_TYPE").unwrap_or_else(|_| "poly_yes_kalshi_no".to_string());
@@ -349,7 +354,7 @@ async fn main() -> Result<()> {
                             yes_size: 1000,  // 1000¢ = 10 contracts
                             no_size: 1000,   // 1000¢ = 10 contracts
                             arb_type,
-                            detected_ns: 0,
+                            detected_ns: test_clock.now_ns(),
                         };
 
                         warn!("[TEST] 🧪 Injecting synthetic {:?} arbitrage for: {}", arb_type, pair.description);
@@ -373,10 +378,11 @@ async fn main() -> Result<()> {
     let kalshi_threshold = threshold_cents;
     let kalshi_ws_config = KalshiConfig::from_env()?;
     let kalshi_shutdown_rx = shutdown_rx.clone();
+    let kalshi_clock = clock.clone();
     let kalshi_handle = tokio::spawn(async move {
         loop {
             let shutdown_rx = kalshi_shutdown_rx.clone();
-            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold, shutdown_rx).await {
+            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold, shutdown_rx, kalshi_clock.clone()).await {
                 error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
@@ -388,10 +394,11 @@ async fn main() -> Result<()> {
     let poly_exec_tx = exec_tx.clone();
     let poly_threshold = threshold_cents;
     let poly_shutdown_rx = shutdown_rx.clone();
+    let poly_clock = clock.clone();
     let poly_handle = tokio::spawn(async move {
         loop {
             let shutdown_rx = poly_shutdown_rx.clone();
-            if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold, shutdown_rx).await {
+            if let Err(e) = polymarket::run_ws(poly_state.clone(), poly_exec_tx.clone(), poly_threshold, shutdown_rx, poly_clock.clone()).await {
                 error!("[POLYMARKET] WebSocket disconnected: {} - reconnecting...", e);
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
