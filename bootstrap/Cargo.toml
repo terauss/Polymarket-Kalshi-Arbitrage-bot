@@ -1,0 +1,13 @@
+[package]
+name = "bootstrap"
+version = "0.1.0"
+edition = "2021"
+description = "Setup CLI for arbitrage bot Tailscale configuration"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+tailscale = { path = "../tailscale" }
