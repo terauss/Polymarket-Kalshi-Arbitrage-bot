@@ -94,37 +94,54 @@ impl GammaClient {
     
     async fn try_lookup_slug(&self, slug: &str) -> Result<Option<(String, String)>> {
         let url = format!("{}/markets?slug={}", GAMMA_API_BASE, slug);
-        
+
         let resp = self.http.get(&url).send().await?;
-        
+
         if !resp.status().is_success() {
             return Ok(None);
         }
-        
+
         let markets: Vec<GammaMarket> = resp.json().await?;
-        
+
         if markets.is_empty() {
             return Ok(None);
         }
-        
+
         let market = &markets[0];
-        
+
         // Check if active and not closed
         if market.closed == Some(true) || market.active == Some(false) {
             return Ok(None);
         }
-        
+
         // Parse clobTokenIds JSON array
         let token_ids: Vec<String> = market.clob_token_ids
             .as_ref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
-        
+
         if token_ids.len() >= 2 {
             Ok(Some((token_ids[0].clone(), token_ids[1].clone())))
         } else {
             Ok(None)
         }
+    }
+
+    /// Fetch events by Polymarket series ID (for esports discovery)
+    pub async fn fetch_events_by_series(&self, series_id: &str) -> Result<Vec<PolyEvent>> {
+        let url = format!(
+            "{}/events?series_id={}&closed=false&limit=100",
+            GAMMA_API_BASE, series_id
+        );
+
+        let resp = self.http.get(&url).send().await?;
+
+        if !resp.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let events: Vec<PolyEvent> = resp.json().await?;
+        Ok(events)
     }
 }
 
@@ -134,6 +151,22 @@ struct GammaMarket {
     clob_token_ids: Option<String>,
     active: Option<bool>,
     closed: Option<bool>,
+}
+
+/// Polymarket event from /events endpoint (for esports discovery)
+#[derive(Debug, Deserialize)]
+pub struct PolyEvent {
+    pub slug: Option<String>,
+    pub title: Option<String>,
+    pub markets: Option<Vec<PolyEventMarket>>,
+}
+
+/// Market within a Polymarket event
+#[derive(Debug, Deserialize)]
+pub struct PolyEventMarket {
+    pub slug: Option<String>,
+    #[serde(rename = "clobTokenIds")]
+    pub clob_token_ids: Option<String>,
 }
 
 /// Increment the date in a Polymarket slug by 1 day
