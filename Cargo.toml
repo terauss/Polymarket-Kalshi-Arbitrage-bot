@@ -42,6 +42,7 @@ parking_lot = "0.12"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 hex = "0.4"
+regex = "1.10"
 
 [profile.release]
 opt-level = 3

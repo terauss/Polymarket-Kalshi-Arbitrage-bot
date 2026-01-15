@@ -2638,6 +2638,7 @@ dependencies = [
  "parking_lot",
  "pkcs1",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "rsa",
  "rustc-hash",
