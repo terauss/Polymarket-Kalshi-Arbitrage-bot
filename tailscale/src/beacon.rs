@@ -119,6 +119,11 @@ impl BeaconListener {
         Ok(Self { socket })
     }
 
+    /// Get the local address the listener is bound to
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
     /// Wait for a controller beacon and return its info
     pub async fn wait_for_controller(&self) -> Result<ControllerInfo> {
         let mut buf = [0u8; 1024];
