@@ -7,6 +7,7 @@ use anyhow::Result;
 use futures_util::{stream, StreamExt};
 use governor::{Quota, RateLimiter, state::NotKeyed, clock::DefaultClock, middleware::NoOpMiddleware};
 use regex::Regex;
+use std::sync::LazyLock;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -977,6 +978,29 @@ fn extract_team_suffix(ticker: &str) -> Option<String> {
 
 // === Esports Discovery Helpers ===
 
+// Static regex patterns compiled once for performance (avoids recompilation on each call)
+static RE_ESPORTS_SUFFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\s*(esports|gaming|team|clan)\s*$").unwrap()
+});
+static RE_ESPORTS_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(team|clan)\s+").unwrap()
+});
+static RE_POLY_TITLE_PARENS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*\(").unwrap()
+});
+static RE_POLY_TITLE_DASH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*-").unwrap()
+});
+static RE_POLY_TITLE_FALLBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+?)(?:\s*\(|\s*-|$)").unwrap()
+});
+static RE_KALSHI_TITLE_COLON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+)$").unwrap()
+});
+static RE_KALSHI_TITLE_FALLBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+)$").unwrap()
+});
+
 /// Normalize esports team name for matching
 /// "FURIA Esports" -> "furia", "Cloud9 New York" -> "cloud9-new-york"
 fn normalize_esports_team(name: &str) -> String {
@@ -984,12 +1008,10 @@ fn normalize_esports_team(name: &str) -> String {
     let lower = name.to_lowercase();
 
     // Remove common suffixes (at the end)
-    let re_suffix = Regex::new(r"(?i)\s*(esports|gaming|team|clan)\s*$").unwrap();
-    let cleaned = re_suffix.replace(&lower, "").to_string();
+    let cleaned = RE_ESPORTS_SUFFIX.replace(&lower, "").to_string();
 
     // Remove common prefixes (at the start, like "Team Liquid" -> "Liquid")
-    let re_prefix = Regex::new(r"(?i)^(team|clan)\s+").unwrap();
-    let cleaned = re_prefix.replace(&cleaned, "").to_string();
+    let cleaned = RE_ESPORTS_PREFIX.replace(&cleaned, "").to_string();
 
     // Also remove periods and apostrophes
     let cleaned = cleaned.replace(".", "").replace("'", "");
@@ -1001,31 +1023,33 @@ fn normalize_esports_team(name: &str) -> String {
 /// Parse Polymarket event title to extract team names
 /// "Counter-Strike: Team1 vs Team2 (BO3)" -> Some((team1, team2))
 fn parse_poly_event_title(title: &str) -> Option<(String, String)> {
-    // Pattern: "Game: Team1 vs Team2 (BON)"
-    let re = Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*\(").ok()?;
-    if let Some(caps) = re.captures(title) {
-        return Some((
+    // Helper to extract teams from captures
+    fn extract_teams(caps: &regex::Captures) -> Option<(String, String)> {
+        Some((
             caps.get(1)?.as_str().trim().to_string(),
             caps.get(2)?.as_str().trim().to_string(),
-        ));
+        ))
+    }
+
+    // Pattern: "Game: Team1 vs Team2 (BON)"
+    if let Some(caps) = RE_POLY_TITLE_PARENS.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
     }
 
     // Fallback: "Game: Team1 vs Team2 - Tournament"
-    let re2 = Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+?)\s*-").ok()?;
-    if let Some(caps) = re2.captures(title) {
-        return Some((
-            caps.get(1)?.as_str().trim().to_string(),
-            caps.get(2)?.as_str().trim().to_string(),
-        ));
+    if let Some(caps) = RE_POLY_TITLE_DASH.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
     }
 
     // Final fallback: just "Team1 vs Team2" without colon prefix
-    let re3 = Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+?)(?:\s*\(|\s*-|$)").ok()?;
-    if let Some(caps) = re3.captures(title) {
-        return Some((
-            caps.get(1)?.as_str().trim().to_string(),
-            caps.get(2)?.as_str().trim().to_string(),
-        ));
+    if let Some(caps) = RE_POLY_TITLE_FALLBACK.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
     }
 
     None
@@ -1050,22 +1074,26 @@ fn extract_date_from_poly_slug(slug: &str) -> Option<String> {
 /// Parse Kalshi esports event title
 /// "Tournament: Team1 vs. Team2" -> Some((team1, team2))
 fn parse_esports_kalshi_title(title: &str) -> Option<(String, String)> {
-    // Pattern: "Tournament: Team1 vs. Team2"
-    let re = Regex::new(r"(?i):\s*(.+?)\s+vs\.?\s+(.+)$").ok()?;
-    if let Some(caps) = re.captures(title) {
-        return Some((
+    // Helper to extract teams from captures
+    fn extract_teams(caps: &regex::Captures) -> Option<(String, String)> {
+        Some((
             caps.get(1)?.as_str().trim().to_string(),
             caps.get(2)?.as_str().trim().to_string(),
-        ));
+        ))
+    }
+
+    // Pattern: "Tournament: Team1 vs. Team2"
+    if let Some(caps) = RE_KALSHI_TITLE_COLON.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
     }
 
     // Fallback: just "Team1 vs Team2"
-    let re2 = Regex::new(r"(?i)(.+?)\s+vs\.?\s+(.+)$").ok()?;
-    if let Some(caps) = re2.captures(title) {
-        return Some((
-            caps.get(1)?.as_str().trim().to_string(),
-            caps.get(2)?.as_str().trim().to_string(),
-        ));
+    if let Some(caps) = RE_KALSHI_TITLE_FALLBACK.captures(title) {
+        if let Some(teams) = extract_teams(&caps) {
+            return Some(teams);
+        }
     }
 
     None
