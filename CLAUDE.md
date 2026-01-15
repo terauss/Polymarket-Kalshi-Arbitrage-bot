@@ -92,6 +92,49 @@ Position Tracking (position_tracker.rs)
 
 **Circuit breaker:** `CB_ENABLED`, `CB_MAX_POSITION_PER_MARKET`, `CB_MAX_TOTAL_POSITION`, `CB_MAX_DAILY_LOSS`, `CB_MAX_CONSECUTIVE_ERRORS`, `CB_COOLDOWN_SECS`
 
+## Tailscale Setup (Remote Trading)
+
+For running controller and trader on separate machines:
+
+```bash
+# First-time setup (run on each machine)
+cargo run -p bootstrap
+
+# This will:
+# 1. Verify Tailscale is installed and connected
+# 2. Prompt for role (controller/trader)
+# 3. Write config to ~/.arb/config.toml
+# 4. Optionally launch the appropriate binary
+```
+
+**Manual setup alternative:**
+
+```bash
+# Install Tailscale
+brew install tailscale
+
+# Start daemon and connect
+sudo tailscaled
+tailscale up
+
+# Verify connection
+tailscale status
+```
+
+**Configuration file:** `~/.arb/config.toml`
+
+```toml
+role = "controller"  # or "trader"
+beacon_port = 9000   # UDP port for discovery
+ws_port = 9001       # WebSocket port
+```
+
+**How it works:**
+- Controller sends UDP beacon to all Tailscale peers every 2 seconds
+- Trader listens for beacon and auto-discovers controller IP/port
+- No manual IP configuration required
+- Falls back to `WEBSOCKET_URL` env var if set
+
 ## Rate Limits
 
 - Kalshi: 2 requests/second (60ms delay between requests)
