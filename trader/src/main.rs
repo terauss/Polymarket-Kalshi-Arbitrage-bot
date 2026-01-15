@@ -18,6 +18,41 @@ use protocol::IncomingMessage;
 use trader::Trader;
 use websocket::WebSocketClient;
 
+/// Discover controller via Tailscale beacon or use configured URL
+async fn resolve_websocket_url(config: &Config) -> Result<String> {
+    // If WEBSOCKET_URL is set, use it directly
+    if let Some(url) = &config.websocket_url {
+        info!("[MAIN] Using configured WEBSOCKET_URL: {}", url);
+        return Ok(url.clone());
+    }
+
+    // Otherwise, use Tailscale beacon discovery
+    info!("[MAIN] No WEBSOCKET_URL set, using Tailscale beacon discovery...");
+
+    // Verify Tailscale is connected
+    let status = tailscale::verify::verify()
+        .context("Tailscale verification failed - run bootstrap first or set WEBSOCKET_URL")?;
+    info!("[MAIN] Tailscale connected as {}", status.self_ip);
+
+    // Load beacon config
+    let ts_config = tailscale::Config::load()
+        .context("Could not load ~/.arb/config.toml - run bootstrap first")?;
+
+    // Listen for controller beacon
+    info!("[MAIN] Waiting for controller beacon on port {}...", ts_config.beacon_port);
+    let listener = tailscale::BeaconListener::new(ts_config.beacon_port).await?;
+
+    let controller = listener
+        .wait_for_controller_timeout(std::time::Duration::from_secs(300))
+        .await
+        .context("Timeout waiting for controller - ensure controller is running")?;
+
+    let url = format!("ws://{}:{}", controller.ip, controller.ws_port);
+    info!("[MAIN] Discovered controller at {}", url);
+
+    Ok(url)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -43,11 +78,22 @@ async fn main() -> Result<()> {
     // Create trader
     let mut trader = Trader::new(config.clone());
 
-    // Create WebSocket client
-    let mut ws_client = WebSocketClient::new(config.websocket_url.clone());
-
     // Main event loop with reconnection logic
     loop {
+        // Resolve WebSocket URL at the start of each connection attempt
+        let ws_url = match resolve_websocket_url(&config).await {
+            Ok(url) => url,
+            Err(e) => {
+                error!("[MAIN] Failed to resolve WebSocket URL: {}", e);
+                warn!("[MAIN] Retrying in 5 seconds...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        // Create WebSocket client with resolved URL
+        let mut ws_client = WebSocketClient::new(ws_url);
+
         match ws_client.connect().await {
             Ok((outgoing_tx, mut incoming_rx)) => {
                 info!("[MAIN] WebSocket connected, starting main loop");

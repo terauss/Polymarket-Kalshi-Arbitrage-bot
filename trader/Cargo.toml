@@ -23,4 +23,6 @@ tokio-tungstenite = "0.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.4"
+tailscale = { path = "../tailscale" }
+tokio-util = "0.7"
 

@@ -1,6 +1,6 @@
 //! Configuration and credential management
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::env;
 
 /// Application configuration loaded from environment variables
@@ -13,7 +13,8 @@ pub struct Config {
     pub polymarket_api_secret: Option<String>,
     pub polymarket_funder: Option<String>,
     pub dry_run: bool,
-    pub websocket_url: String,
+    /// WebSocket URL - None means use beacon discovery
+    pub websocket_url: Option<String>,
 }
 
 impl Config {
@@ -33,8 +34,8 @@ impl Config {
             .map(|v| v == "1" || v == "true" || v == "yes")
             .unwrap_or(false);
 
-        let websocket_url = env::var("WEBSOCKET_URL")
-            .context("WEBSOCKET_URL environment variable is required")?;
+        // WEBSOCKET_URL is now optional - if not set, use beacon discovery
+        let websocket_url = env::var("WEBSOCKET_URL").ok();
 
         Ok(Self {
             kalshi_api_key,
