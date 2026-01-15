@@ -28,8 +28,18 @@ pub const KALSHI_API_DELAY_MS: u64 = 60;
 /// WebSocket reconnect delay (seconds)
 pub const WS_RECONNECT_DELAY_SECS: u64 = 5;
 
-/// Which leagues to monitor (empty slice = all)
-pub const ENABLED_LEAGUES: &[&str] = &[];
+/// Which leagues to monitor (empty = all)
+/// Set ENABLED_LEAGUES env var to comma-separated list, e.g., "cs2,lol,cod"
+pub fn enabled_leagues() -> &'static [String] {
+    static CACHED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(|| {
+        std::env::var("ENABLED_LEAGUES")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(',').map(|l| l.trim().to_lowercase()).collect())
+            .unwrap_or_default()
+    })
+}
 
 /// Price logging enabled (set PRICE_LOGGING=1 to enable)
 #[allow(dead_code)]

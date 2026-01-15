@@ -42,7 +42,7 @@ use tracing::{error, info, warn};
 
 use cache::TeamCache;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use config::{ARB_THRESHOLD, ENABLED_LEAGUES, WS_RECONNECT_DELAY_SECS};
+use config::{ARB_THRESHOLD, enabled_leagues, WS_RECONNECT_DELAY_SECS};
 use discovery::DiscoveryClient;
 use execution::{ExecutionEngine, create_execution_channel, run_execution_loop};
 use kalshi::{KalshiConfig, KalshiApiClient};
@@ -61,8 +61,11 @@ async fn discovery_refresh_task(
     state: Arc<GlobalState>,
     shutdown_tx: watch::Sender<bool>,
     interval_mins: u64,
-    leagues: &'static [&'static str],
 ) {
+    // Get leagues from env (cached)
+    let enabled = enabled_leagues();
+    let leagues_vec: Vec<&str> = enabled.iter().map(|s| s.as_str()).collect();
+    let leagues: &[&str] = &leagues_vec;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     if interval_mins == 0 {
@@ -160,7 +163,15 @@ async fn main() -> Result<()> {
     info!("🚀 Prediction Market Arbitrage System v2.0");
     info!("   Profit threshold: <{:.1}¢ ({:.1}% minimum profit)",
           ARB_THRESHOLD * 100.0, (1.0 - ARB_THRESHOLD) * 100.0);
-    info!("   Monitored leagues: {:?}", ENABLED_LEAGUES);
+
+    // Get enabled leagues (convert &[String] to Vec<&str> for API compatibility)
+    let enabled = enabled_leagues();
+    let leagues: Vec<&str> = enabled.iter().map(|s| s.as_str()).collect();
+    let leagues: &[&str] = if leagues.is_empty() { &[] } else { &leagues };
+    info!("   Monitored leagues: {:?}", if leagues.is_empty() { "all" } else { "filtered" });
+    if !leagues.is_empty() {
+        info!("   Enabled: {:?}", leagues);
+    }
 
     // Check for dry run mode
     let dry_run = std::env::var("DRY_RUN").map(|v| v == "1" || v == "true").unwrap_or(true);
@@ -222,9 +233,9 @@ async fn main() -> Result<()> {
     );
 
     let result = if force_discovery {
-        discovery.discover_all_force(ENABLED_LEAGUES).await
+        discovery.discover_all_force(leagues).await
     } else {
-        discovery.discover_all(ENABLED_LEAGUES).await
+        discovery.discover_all(leagues).await
     };
 
     info!("📊 Market discovery complete:");
@@ -476,7 +487,6 @@ async fn main() -> Result<()> {
             discovery_state,
             shutdown_tx,
             discovery_interval,
-            ENABLED_LEAGUES,
         ).await;
     });
 
